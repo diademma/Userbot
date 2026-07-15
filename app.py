@@ -1,4 +1,4 @@
-# CODEVER: v1.4 | Sniper Userbot for LEX (Alt-Account Control Fix)
+# CODEVER: v1.5 | Sniper Userbot for LEX (Owner Gameplay Fix)
 import os
 import re
 import asyncio
@@ -133,12 +133,13 @@ async def command_and_self_destruct(event, delay, command_text):
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
 async def message_handler(event):
     """Перехватывает все сообщения в группах и каналах"""
-    # Игнорируем команды от вашего основного аккаунта OWNER_ID и сообщения Лекса
-    if event.sender_id == OWNER_ID or (event.sender and event.sender.username == LEX_BOT_USERNAME):
-        return
-
     text = event.raw_text
     if not text:
+        return
+
+    # Игнорируем только сообщения самого Лекса и управляющие команды владельца (начинающиеся с "sudo")
+    # Теперь ваши обычные игровые сообщения (например, фарма) будут обрабатываться юзерботом!
+    if (event.sender and event.sender.username == LEX_BOT_USERNAME) or text.strip().lower().startswith("sudo"):
         return
         
     # --- СЦЕНАРИЙ 1: Сообщение от ЧЕЛОВЕКА ---
@@ -192,7 +193,7 @@ async def owner_commands_handler(event):
             f"• `sudo set_delay_user {delay_user}`\n"
             f"• `sudo set_delay_bot {delay_bot}`"
         )
-        return await event.reply(help_text)  # <--- ИСПРАВЛЕНО (используем reply вместо edit)
+        return await event.reply(help_text)
 
     # --- Обработка субкоманд ---
     try:
