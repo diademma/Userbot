@@ -1,0 +1,39 @@
+name: LEX Sniper Userbot
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # Автоматический перезапуск каждые 30 минут
+  workflow_dispatch: # Возможность запустить вручную одной кнопкой
+
+concurrency:
+  group: telegram-userbot
+  cancel-in-progress: true # УБИВАЕТ старого бота перед запуском нового (защита от бана сессии)
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Разрешает боту пушить измененную базу данных обратно в репозиторий
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true # Важно для корректного пуша БД
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install telethon
+
+      - name: Run Userbot
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          SESSION_STRING: ${{ secrets.SESSION_STRING }}
+        run: python app.py
