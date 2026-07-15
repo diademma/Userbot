@@ -1,4 +1,4 @@
-# CODEVER: v1.5 | Sniper Userbot for LEX (Owner Gameplay Fix)
+# CODEVER: v1.6 | Sniper Userbot for LEX (re.match Upgrade)
 import os
 import re
 import asyncio
@@ -122,10 +122,9 @@ async def command_and_self_destruct(event, delay, command_text):
     """Отвечает на сообщение командой для Лекса и самоуничтожается через 5 сек"""
     try:
         await asyncio.sleep(delay)
-        # Отвечаем на целевое сообщение командой для Лекса
         cmd_message = await event.reply(command_text)
-        # Ждем 5 секунд и удаляем нашу команду, чтобы не захламлять чат
         await asyncio.sleep(5)
+        cmd_message_id = cmd_message.id
         await cmd_message.delete()
     except Exception as e:
         logging.warning(f"Не удалось отправить команду на удаление: {e}")
@@ -133,13 +132,13 @@ async def command_and_self_destruct(event, delay, command_text):
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
 async def message_handler(event):
     """Перехватывает все сообщения в группах и каналах"""
-    text = event.raw_text
+    # Очищаем входящий текст от случайных пробелов в начале и конце
+    text = event.raw_text.strip() if event.raw_text else None
     if not text:
         return
 
     # Игнорируем только сообщения самого Лекса и управляющие команды владельца (начинающиеся с "sudo")
-    # Теперь ваши обычные игровые сообщения (например, фарма) будут обрабатываться юзерботом!
-    if (event.sender and event.sender.username == LEX_BOT_USERNAME) or text.strip().lower().startswith("sudo"):
+    if (event.sender and event.sender.username == LEX_BOT_USERNAME) or text.lower().startswith("sudo"):
         return
         
     # --- СЦЕНАРИЙ 1: Сообщение от ЧЕЛОВЕКА ---
@@ -147,8 +146,9 @@ async def message_handler(event):
         patterns = db_list('regex_patterns')
         for pattern in patterns:
             try:
-                if re.search(pattern, text, re.IGNORECASE):
-                    logging.info(f"Найдено совпадение с регексом '{pattern}' в сообщении от человека.")
+                # Используем re.match вместо re.search, чтобы проверять совпадение СТРОГО С НАЧАЛА строки
+                if re.match(pattern, text, re.IGNORECASE):
+                    logging.info(f"Найдено совпадение с регексом '{pattern}' в начале сообщения человека.")
                     delay = db_get_int('delay_user_command', 5)
                     asyncio.create_task(command_and_self_destruct(event, delay, "Лекс, удали"))
                     return
