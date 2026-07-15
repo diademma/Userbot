@@ -1,4 +1,4 @@
-# CODEVER: v1.3 | Sniper Userbot for LEX (StringSession Fix)
+# CODEVER: v1.4 | Sniper Userbot for LEX (Alt-Account Control Fix)
 import os
 import re
 import asyncio
@@ -6,12 +6,12 @@ import sqlite3
 import logging
 import subprocess
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession  # <--- ИМПОРТ КЛАССА СТРОКОВОЙ СЕССИИ
+from telethon.sessions import StringSession
 
 # --- НАСТРОЙКИ ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ID единственного владельца, чьи команды будет слушать юзербот
+# ID вашего ОСНОВНОГО аккаунта (с которого вы будете отправлять команды sudo)
 OWNER_ID = 5421909121 
 # Юзернейм вашего основного бота LEX (без @)
 LEX_BOT_USERNAME = "my_LEX_superbot"
@@ -21,17 +21,14 @@ DB_NAME = "userbot_memory.db"
 def save_db_to_git():
     """Автоматически коммитит и пушит файл базы данных в ваш репозиторий GitHub"""
     try:
-        # Проверяем, есть ли реальные изменения в БД перед пушем
         status = subprocess.run(["git", "status", "--porcelain", DB_NAME], capture_output=True, text=True)
         if not status.stdout.strip():
             logging.info("Изменений в базе данных нет, пуш отменен.")
             return
 
-        # Настраиваем системного бота GitHub Actions для совершения коммита
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         
-        # Добавляем, коммитим и отправляем изменения в ветку
         subprocess.run(["git", "add", DB_NAME], check=True)
         subprocess.run(["git", "commit", "-m", "chore: update userbot memory [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
@@ -43,14 +40,10 @@ def save_db_to_git():
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    # Таблица для регулярных выражений (для сообщений людей)
     cur.execute("CREATE TABLE IF NOT EXISTS regex_patterns (id INTEGER PRIMARY KEY, pattern TEXT UNIQUE)")
-    # Таблица для бан-слов (для сообщений ботов)
     cur.execute("CREATE TABLE IF NOT EXISTS bot_banwords (id INTEGER PRIMARY KEY, word TEXT UNIQUE)")
-    # Таблица для настроек (задержки времени)
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     
-    # Значения по умолчанию
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('delay_user_command', '5')")
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('delay_bot_response', '30')")
     
@@ -68,7 +61,6 @@ def db_add(table, value):
             conn.execute("INSERT INTO bot_banwords (word) VALUES (?)", (value,))
         conn.commit()
         conn.close()
-        # Сохраняем изменения в GitHub
         save_db_to_git()
         return True
     except sqlite3.IntegrityError:
@@ -118,9 +110,8 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 if API_ID:
     API_ID = int(API_ID)
 
-# Создаем клиент, используя класс StringSession для корректного чтения длинной строки сессии
 client = TelegramClient(
-    session=StringSession(SESSION_STRING),  # <--- ИСПРАВЛЕНО
+    session=StringSession(SESSION_STRING),
     api_id=API_ID,
     api_hash=API_HASH
 )
@@ -131,7 +122,9 @@ async def command_and_self_destruct(event, delay, command_text):
     """Отвечает на сообщение командой для Лекса и самоуничтожается через 5 сек"""
     try:
         await asyncio.sleep(delay)
+        # Отвечаем на целевое сообщение командой для Лекса
         cmd_message = await event.reply(command_text)
+        # Ждем 5 секунд и удаляем нашу команду, чтобы не захламлять чат
         await asyncio.sleep(5)
         await cmd_message.delete()
     except Exception as e:
@@ -140,6 +133,7 @@ async def command_and_self_destruct(event, delay, command_text):
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
 async def message_handler(event):
     """Перехватывает все сообщения в группах и каналах"""
+    # Игнорируем команды от вашего основного аккаунта OWNER_ID и сообщения Лекса
     if event.sender_id == OWNER_ID or (event.sender and event.sender.username == LEX_BOT_USERNAME):
         return
 
@@ -178,6 +172,7 @@ async def owner_commands_handler(event):
     subcommand = parts[1] if len(parts) > 1 else None
     value = " ".join(parts[2:]) if len(parts) > 2 else None
 
+    # --- Главная команда sudo ---
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         delay_bot = db_get_int('delay_bot_response', 30)
@@ -197,52 +192,53 @@ async def owner_commands_handler(event):
             f"• `sudo set_delay_user {delay_user}`\n"
             f"• `sudo set_delay_bot {delay_bot}`"
         )
-        return await event.edit(help_text)
+        return await event.reply(help_text)  # <--- ИСПРАВЛЕНО (используем reply вместо edit)
 
+    # --- Обработка субкоманд ---
     try:
         if subcommand == "add_regex" and value:
-            if db_add('regex_patterns', value): await event.edit(f"✅ Регекс `{value}` добавлен.")
-            else: await event.edit(f"⚠️ Регекс `{value}` уже есть в базе.")
+            if db_add('regex_patterns', value): await event.reply(f"✅ Регекс `{value}` добавлен.")
+            else: await event.reply(f"⚠️ Регекс `{value}` уже есть в базе.")
         
         elif subcommand == "del_regex" and value:
-            if db_del('regex_patterns', value): await event.edit(f"🗑 Регекс `{value}` удален.")
-            else: await event.edit(f"❌ Регекс `{value}` не найден.")
+            if db_del('regex_patterns', value): await event.reply(f"🗑 Регекс `{value}` удален.")
+            else: await event.reply(f"❌ Регекс `{value}` не найден.")
         
         elif subcommand == "list_regex":
             items = db_list('regex_patterns')
             text = "🧹 **Список регексов:**\n" + ("\n".join([f"• `{item}`" for item in items]) if items else "Пусто.")
-            await event.edit(text)
+            await event.reply(text)
 
         elif subcommand == "add_banword" and value:
-            if db_add('bot_banwords', value): await event.edit(f"✅ Бан-слово `{value}` добавлено.")
-            else: await event.edit(f"⚠️ Слово `{value}` уже есть в базе.")
+            if db_add('bot_banwords', value): await event.reply(f"✅ Бан-слово `{value}` добавлено.")
+            else: await event.reply(f"⚠️ Слово `{value}` уже есть в базе.")
 
         elif subcommand == "del_banword" and value:
-            if db_del('bot_banwords', value): await event.edit(f"🗑 Бан-слово `{value}` удалено.")
-            else: await event.edit(f"❌ Слово `{value}` не найден.")
+            if db_del('bot_banwords', value): await event.reply(f"🗑 Бан-слово `{value}` удалено.")
+            else: await event.reply(f"❌ Слово `{value}` не найдено.")
 
         elif subcommand == "list_banwords":
             items = db_list('bot_banwords')
             text = "🚫 **Список бан-слов для ботов:**\n" + ("\n".join([f"• `{item}`" for item in items]) if items else "Пусто.")
-            await event.edit(text)
+            await event.reply(text)
             
         elif subcommand == "set_delay_user" and value:
             if value.isdigit():
                 db_set('delay_user_command', value)
-                await event.edit(f"⏱ Задержка для команд людей изменена на **{value}** сек.")
-            else: await event.edit("❌ Значение должно быть числом.")
+                await event.reply(f"⏱ Задержка для команд людей изменена на **{value}** сек.")
+            else: await event.reply("❌ Значение должно быть числом.")
 
         elif subcommand == "set_delay_bot" and value:
             if value.isdigit():
                 db_set('delay_bot_response', value)
-                await event.edit(f"⏱ Задержка для ответов ботов изменена на **{value}** сек.")
-            else: await event.edit("❌ Значение должно быть числом.")
+                await event.reply(f"⏱ Задержка для ответов ботов изменена на **{value}** сек.")
+            else: await event.reply("❌ Значение должно быть числом.")
 
         else:
-            await event.edit("❌ Неизвестная команда. Напишите `sudo` для справки.")
+            await event.reply("❌ Неизвестная команда. Напишите `sudo` для справки.")
             
     except Exception as e:
-        await event.edit(f"**Ошибка выполнения:**\n`{e}`")
+        await event.reply(f"**Ошибка выполнения:**\n`{e}`")
 
 
 async def main():
