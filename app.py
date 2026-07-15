@@ -1,4 +1,4 @@
-# CODEVER: v1.2 | Sniper Userbot for LEX (GitHub Actions Version)
+# CODEVER: v1.3 | Sniper Userbot for LEX (StringSession Fix)
 import os
 import re
 import asyncio
@@ -6,6 +6,7 @@ import sqlite3
 import logging
 import subprocess
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession  # <--- ИМПОРТ КЛАССА СТРОКОВОЙ СЕССИИ
 
 # --- НАСТРОЙКИ ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -117,8 +118,9 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 if API_ID:
     API_ID = int(API_ID)
 
+# Создаем клиент, используя класс StringSession для корректного чтения длинной строки сессии
 client = TelegramClient(
-    session=SESSION_STRING,
+    session=StringSession(SESSION_STRING),  # <--- ИСПРАВЛЕНО
     api_id=API_ID,
     api_hash=API_HASH
 )
