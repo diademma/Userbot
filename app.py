@@ -1,4 +1,4 @@
-# CODEVER: v1.6 | Sniper Userbot for LEX (re.match Upgrade)
+# CODEVER: v1.7 | Sniper Userbot for LEX (PM Silent Delete Version)
 import os
 import re
 import asyncio
@@ -118,21 +118,18 @@ client = TelegramClient(
 
 # --- ГЛАВНАЯ ЛОГИКА ЮЗЕРБОТА ---
 
-async def command_and_self_destruct(event, delay, command_text):
-    """Отвечает на сообщение командой для Лекса и самоуничтожается через 5 сек"""
+async def send_private_delete(chat_id, message_id, delay):
+    """Тихо отправляет Лексу в ЛС команду на удаление целевого сообщения по таймеру"""
     try:
         await asyncio.sleep(delay)
-        cmd_message = await event.reply(command_text)
-        await asyncio.sleep(5)
-        cmd_message_id = cmd_message.id
-        await cmd_message.delete()
+        # Отправляем Лексу секретную команду в ЛС
+        await client.send_message(LEX_BOT_USERNAME, f"sudo_del {chat_id} {message_id}")
     except Exception as e:
-        logging.warning(f"Не удалось отправить команду на удаление: {e}")
+        logging.warning(f"Не удалось отправить приватную команду удаления: {e}")
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
 async def message_handler(event):
     """Перехватывает все сообщения в группах и каналах"""
-    # Очищаем входящий текст от случайных пробелов в начале и конце
     text = event.raw_text.strip() if event.raw_text else None
     if not text:
         return
@@ -141,16 +138,19 @@ async def message_handler(event):
     if (event.sender and event.sender.username == LEX_BOT_USERNAME) or text.lower().startswith("sudo"):
         return
         
+    chat_id = event.chat_id
+    msg_id = event.id
+
     # --- СЦЕНАРИЙ 1: Сообщение от ЧЕЛОВЕКА ---
     if event.sender and not event.sender.bot:
         patterns = db_list('regex_patterns')
         for pattern in patterns:
             try:
-                # Используем re.match вместо re.search, чтобы проверять совпадение СТРОГО С НАЧАЛА строки
+                # Используем re.match, чтобы проверять совпадение СТРОГО С НАЧАЛА строки
                 if re.match(pattern, text, re.IGNORECASE):
-                    logging.info(f"Найдено совпадение с регексом '{pattern}' в начале сообщения человека.")
+                    logging.info(f"Найдено совпадение с регексом '{pattern}' в начале сообщения человека. Отправляю приказ в ЛС.")
                     delay = db_get_int('delay_user_command', 5)
-                    asyncio.create_task(command_and_self_destruct(event, delay, "Лекс, удали"))
+                    asyncio.create_task(send_private_delete(chat_id, msg_id, delay))
                     return
             except re.error:
                 logging.error(f"Ошибка в регулярном выражении: {pattern}")
@@ -160,9 +160,9 @@ async def message_handler(event):
         banwords = db_list('bot_banwords')
         for word in banwords:
             if word.lower() in text.lower():
-                logging.info(f"Найдено бан-слово '{word}' в сообщении от бота.")
+                logging.info(f"Найдено бан-слово '{word}' в сообщении от бота. Отправляю приказ в ЛС.")
                 delay = db_get_int('delay_bot_response', 30)
-                asyncio.create_task(command_and_self_destruct(event, delay, "Лекс, удали"))
+                asyncio.create_task(send_private_delete(chat_id, msg_id, delay))
                 return
 
 @client.on(events.NewMessage(from_users=OWNER_ID, pattern=r"^sudo.*"))
