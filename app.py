@@ -1,4 +1,4 @@
-# CODEVER: v2.3 | Sniper Userbot for LEX (Instant GitHub Logs & Single-Letter Protection)
+# CODEVER: v2.4 | Sniper Userbot for LEX (In-Telegram 'sudo log' & Live Buffer)
 import os
 import re
 import sys
@@ -6,19 +6,39 @@ import asyncio
 import sqlite3
 import logging
 import subprocess
+from collections import deque
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User
 
-# --- НАСТРОЙКИ МГНОВЕННОГО ВЫВОДА ЛОГОВ В GITHUB ACTIONS ---
+# --- БУФЕР ЛОГОВ В ПАМЯТИ ДЛЯ КОМАНДЫ 'sudo log' ---
+class MemoryLogHandler(logging.Handler):
+    def __init__(self, capacity=50):
+        super().__init__()
+        self.buffer = deque(maxlen=capacity)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.buffer.append(msg)
+        except Exception:
+            self.handleError(record)
+
+    def get_logs(self, limit=15):
+        logs = list(self.buffer)
+        return logs[-limit:] if logs else []
+
+# Настройка логирования в консоль и в оперативную память
+memory_log_handler = MemoryLogHandler(capacity=50)
+memory_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler(sys.stdout))
+logger.addHandler(memory_log_handler)
 
 OWNER_ID = 5421909121 
 LEX_BOT_USERNAME = "my_LEX_superbot"
@@ -49,7 +69,7 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS bot_banwords (id INTEGER PRIMARY KEY, word TEXT UNIQUE, delay INTEGER DEFAULT 45)")
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     
-    # Автоматическое удаление пустых записей и опасно написанных регексов одиночных букв
+    # Автоматическая чистка пустых и опасных записей
     cur.execute("DELETE FROM bot_banwords WHERE word IS NULL OR TRIM(word) = '' OR word LIKE '%(д|н|м%'")
     cur.execute("DELETE FROM regex_patterns WHERE pattern IS NULL OR TRIM(pattern) = ''")
     
@@ -61,7 +81,7 @@ def init_db():
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('delay_user_command', '5')")
     conn.commit()
     conn.close()
-    logging.info("База данных инициализирована, очищена от опасных регексов и фантомов.")
+    logging.info("База данных инициализирована и защищена.")
 
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 def db_add_regex(pattern):
@@ -152,7 +172,7 @@ async def delete_after(event, delay, reason=""):
     try:
         await asyncio.sleep(delay)
         await event.delete()
-        logging.info(f"🗑 Сообщение {event.id} успешно удалено. Причина: [{reason}]")
+        logging.info(f"🗑 Сообщение {event.id} удалено. Причина: [{reason}]")
     except Exception as e:
         logging.warning(f"Не удалось удалить сообщение {event.id}: {e}")
 
@@ -162,7 +182,6 @@ async def message_handler(event):
     if not text:
         return
 
-    # НАДЕЖНОЕ ПОЛУЧЕНИЕ ОТПРАВИТЕЛЯ (запрос к Telegram)
     sender = await event.get_sender()
     if not sender:
         return
@@ -170,9 +189,14 @@ async def message_handler(event):
     is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
     sender_username = getattr(sender, 'username', '') or 'unknown'
 
-    # Игнорируем Лекса и команды sudo
+    # Игнорируем Лекса и sudo-команды
     if sender_username.lower() == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo"):
         return
+
+    # Логируем полученое сообщение от бота
+    if is_bot:
+        short_text = text[:35].replace('\n', ' ')
+        logging.info(f"📩 Бот @{sender_username} прислал: '{short_text}...'")
 
     # --- СЦЕНАРИЙ 1: Сообщение от ЧЕЛОВЕКА ---
     if not is_bot:
@@ -189,7 +213,7 @@ async def message_handler(event):
                     asyncio.create_task(delete_after(event, delay, reason))
                     return
             except re.error as e:
-                logging.error(f"Ошибка в регулярном выражении '{pattern_clean}': {e}")
+                logging.error(f"Ошибка в регексе '{pattern_clean}': {e}")
 
     # --- СЦЕНАРИЙ 2: Сообщение от БОТА ---
     else:
@@ -201,14 +225,13 @@ async def message_handler(event):
 
             matched = False
 
-            # 1. Проверяем точное вхождение подстроки (самый надежный способ)
+            # 1. Проверяем точное вхождение подстроки
             if word_clean.lower() in text.lower():
                 matched = True
-            # 2. Проверяем как регекс (С ЗАЩИТОЙ от одиночных букв 'д', 'н', 'м')
+            # 2. Проверяем как регекс (с защитой от совпадения с 1 буквой)
             elif any(c in word_clean for c in r".*+?^$[]{}()|\\"):
                 try:
                     m = re.search(word_clean, text, re.IGNORECASE)
-                    # Защита: не засчитываем совпадение, если регекс совпал всего с 1 буквой
                     if m and len(m.group(0)) > 1:
                         matched = True
                 except re.error:
@@ -227,10 +250,13 @@ async def owner_commands_handler(event):
     subcommand = parts[1] if len(parts) > 1 else None
     value = " ".join(parts[2:]) if len(parts) > 2 else None
 
+    # --- Главная команда sudo ---
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v2.3 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v2.4 активен!**\n\n"
+            "**Просмотр логов:**\n"
+            "• `sudo log` — Показать последние логи юзербота\n\n"
             "**Триггеры для людей (Regex):**\n"
             "• `sudo add_regex {выражение}`\n"
             "• `sudo del_regex {выражение}`\n"
@@ -245,7 +271,20 @@ async def owner_commands_handler(event):
         return await event.reply(help_text)
 
     try:
-        if subcommand == "add_regex" and value:
+        # --- КОМАНДА ДЛЯ ПРОСМОТРА ЛОГОВ ПРЯМО В ТЕЛЕГРАМ ---
+        if subcommand in ["log", "logs"]:
+            logs = memory_log_handler.get_logs(limit=20)
+            if not logs:
+                return await event.reply("📄 **Логи пока пусты.**")
+
+            log_text = "\n".join(logs)
+            if len(log_text) > 3900:
+                log_text = log_text[-3900:]
+
+            reply_text = f"📜 **Последние логи юзербота:**\n\n```text\n{log_text}\n```"
+            await event.reply(reply_text)
+
+        elif subcommand == "add_regex" and value:
             if db_add_regex(value): await event.reply(f"✅ Регекс `{value}` добавлен.")
             else: await event.reply(f"⚠️ Регекс `{value}` уже есть в базе.")
         
