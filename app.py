@@ -1,6 +1,7 @@
-# CODEVER: v2.2 | Sniper Userbot for LEX (Auto-Clean DB & Detailed Logs)
+# CODEVER: v2.3 | Sniper Userbot for LEX (Instant GitHub Logs & Single-Letter Protection)
 import os
 import re
+import sys
 import asyncio
 import sqlite3
 import logging
@@ -9,8 +10,15 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User
 
-# --- НАСТРОЙКИ ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# --- НАСТРОЙКИ МГНОВЕННОГО ВЫВОДА ЛОГОВ В GITHUB ACTIONS ---
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 OWNER_ID = 5421909121 
 LEX_BOT_USERNAME = "my_LEX_superbot"
@@ -41,8 +49,8 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS bot_banwords (id INTEGER PRIMARY KEY, word TEXT UNIQUE, delay INTEGER DEFAULT 45)")
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     
-    # Автоматическое удаление фантомных/пустых записей, если они попали в БД
-    cur.execute("DELETE FROM bot_banwords WHERE word IS NULL OR TRIM(word) = ''")
+    # Автоматическое удаление пустых записей и опасно написанных регексов одиночных букв
+    cur.execute("DELETE FROM bot_banwords WHERE word IS NULL OR TRIM(word) = '' OR word LIKE '%(д|н|м%'")
     cur.execute("DELETE FROM regex_patterns WHERE pattern IS NULL OR TRIM(pattern) = ''")
     
     try:
@@ -53,7 +61,7 @@ def init_db():
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('delay_user_command', '5')")
     conn.commit()
     conn.close()
-    logging.info("База данных инициализирована и очищена от фантомных записей.")
+    logging.info("База данных инициализирована, очищена от опасных регексов и фантомов.")
 
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 def db_add_regex(pattern):
@@ -144,7 +152,7 @@ async def delete_after(event, delay, reason=""):
     try:
         await asyncio.sleep(delay)
         await event.delete()
-        logging.info(f"🗑 Сообщение {event.id} удалено. Причина: [{reason}]")
+        logging.info(f"🗑 Сообщение {event.id} успешно удалено. Причина: [{reason}]")
     except Exception as e:
         logging.warning(f"Не удалось удалить сообщение {event.id}: {e}")
 
@@ -154,7 +162,7 @@ async def message_handler(event):
     if not text:
         return
 
-    # НАДЕЖНОЕ ПОЛУЧЕНИЕ ОТПРАВИТЕЛЯ (запрос к Telegram, если нет в кэше)
+    # НАДЕЖНОЕ ПОЛУЧЕНИЕ ОТПРАВИТЕЛЯ (запрос к Telegram)
     sender = await event.get_sender()
     if not sender:
         return
@@ -170,15 +178,18 @@ async def message_handler(event):
     if not is_bot:
         patterns = db_list_regex()
         for pattern in patterns:
+            pattern_clean = pattern.strip()
+            if not pattern_clean:
+                continue
             try:
-                if re.match(pattern, text, re.IGNORECASE):
+                if re.match(pattern_clean, text, re.IGNORECASE):
                     delay = db_get_int('delay_user_command', 5)
-                    reason = f"Регекс человека: '{pattern}'"
+                    reason = f"Регекс человека: '{pattern_clean}'"
                     logging.info(f"🚨 [ЧЕЛОВЕК @{sender_username}] {reason}. Удаление через {delay} сек.")
                     asyncio.create_task(delete_after(event, delay, reason))
                     return
             except re.error as e:
-                logging.error(f"Ошибка в регулярном выражении '{pattern}': {e}")
+                logging.error(f"Ошибка в регулярном выражении '{pattern_clean}': {e}")
 
     # --- СЦЕНАРИЙ 2: Сообщение от БОТА ---
     else:
@@ -189,13 +200,19 @@ async def message_handler(event):
                 continue
 
             matched = False
-            try:
-                # Проверяем как регекс и как подстроку
-                if re.search(word_clean, text, re.IGNORECASE):
-                    matched = True
-            except re.error:
-                if word_clean.lower() in text.lower():
-                    matched = True
+
+            # 1. Проверяем точное вхождение подстроки (самый надежный способ)
+            if word_clean.lower() in text.lower():
+                matched = True
+            # 2. Проверяем как регекс (С ЗАЩИТОЙ от одиночных букв 'д', 'н', 'м')
+            elif any(c in word_clean for c in r".*+?^$[]{}()|\\"):
+                try:
+                    m = re.search(word_clean, text, re.IGNORECASE)
+                    # Защита: не засчитываем совпадение, если регекс совпал всего с 1 буквой
+                    if m and len(m.group(0)) > 1:
+                        matched = True
+                except re.error:
+                    pass
 
             if matched:
                 reason = f"Бан-слово бота: '{word_clean}'"
@@ -213,7 +230,7 @@ async def owner_commands_handler(event):
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v2.2 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v2.3 активен!**\n\n"
             "**Триггеры для людей (Regex):**\n"
             "• `sudo add_regex {выражение}`\n"
             "• `sudo del_regex {выражение}`\n"
