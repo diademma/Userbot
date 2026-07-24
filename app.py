@@ -1,4 +1,4 @@
-# CODEVER: v2.4 | Sniper Userbot for LEX (In-Telegram 'sudo log' & Live Buffer)
+# CODEVER: v2.5 | Sniper Userbot for LEX (In-Telegram 'sudo log', Live Buffer & Exception Whitelist)
 import os
 import re
 import sys
@@ -67,11 +67,13 @@ def init_db():
     cur = conn.cursor()
     cur.execute("CREATE TABLE IF NOT EXISTS regex_patterns (id INTEGER PRIMARY KEY, pattern TEXT UNIQUE)")
     cur.execute("CREATE TABLE IF NOT EXISTS bot_banwords (id INTEGER PRIMARY KEY, word TEXT UNIQUE, delay INTEGER DEFAULT 45)")
+    cur.execute("CREATE TABLE IF NOT EXISTS bot_exceptions (id INTEGER PRIMARY KEY, word TEXT UNIQUE)")
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     
     # Автоматическая чистка пустых и опасных записей
     cur.execute("DELETE FROM bot_banwords WHERE word IS NULL OR TRIM(word) = '' OR word LIKE '%(д|н|м%'")
     cur.execute("DELETE FROM regex_patterns WHERE pattern IS NULL OR TRIM(pattern) = ''")
+    cur.execute("DELETE FROM bot_exceptions WHERE word IS NULL OR TRIM(word) = ''")
     
     try:
         cur.execute("ALTER TABLE bot_banwords ADD COLUMN delay INTEGER DEFAULT 45")
@@ -107,6 +109,17 @@ def db_add_banword(word, delay=45):
         logging.error(f"Ошибка БД при сохранении бан-слова: {e}")
         return False
 
+def db_add_exception(word):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("INSERT INTO bot_exceptions (word) VALUES (?)", (word.strip(),))
+        conn.commit()
+        conn.close()
+        save_db_to_git()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
 def db_del_regex(pattern):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -127,6 +140,16 @@ def db_del_banword(word):
     if changes > 0: save_db_to_git()
     return changes > 0
 
+def db_del_exception(word):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM bot_exceptions WHERE word = ?", (word.strip(),))
+    changes = conn.total_changes
+    conn.commit()
+    conn.close()
+    if changes > 0: save_db_to_git()
+    return changes > 0
+
 def db_list_regex():
     conn = sqlite3.connect(DB_NAME)
     items = conn.execute("SELECT pattern FROM regex_patterns").fetchall()
@@ -138,6 +161,12 @@ def db_list_banwords():
     items = conn.execute("SELECT word, delay FROM bot_banwords").fetchall()
     conn.close()
     return [(item[0], item[1]) for item in items if item[0] and item[0].strip()]
+
+def db_list_exceptions():
+    conn = sqlite3.connect(DB_NAME)
+    items = conn.execute("SELECT word FROM bot_exceptions").fetchall()
+    conn.close()
+    return [item[0] for item in items if item[0] and item[0].strip()]
 
 def db_set(key, value):
     conn = sqlite3.connect(DB_NAME)
@@ -193,7 +222,7 @@ async def message_handler(event):
     if sender_username.lower() == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo"):
         return
 
-    # Логируем полученое сообщение от бота
+    # Логируем полученное сообщение от бота
     if is_bot:
         short_text = text[:35].replace('\n', ' ')
         logging.info(f"📩 Бот @{sender_username} прислал: '{short_text}...'")
@@ -217,6 +246,31 @@ async def message_handler(event):
 
     # --- СЦЕНАРИЙ 2: Сообщение от БОТА ---
     else:
+        # === ШАГ 1: ВЫСОКИЙ ПРИОРИТЕТ — ПРОВЕРКА СЛОВ-ИСКЛЮЧЕНИЙ ===
+        exceptions = db_list_exceptions()
+        for exc_word in exceptions:
+            exc_clean = exc_word.strip()
+            if not exc_clean:
+                continue
+
+            exc_matched = False
+            # 1.1 Точное совпадение подстроки
+            if exc_clean.lower() in text.lower():
+                exc_matched = True
+            # 1.2 Проверка как Regex (если содержит спецсимволы)
+            elif any(c in exc_clean for c in r".*+?^$[]{}()|\\"):
+                try:
+                    m = re.search(exc_clean, text, re.IGNORECASE)
+                    if m and len(m.group(0)) > 1:
+                        exc_matched = True
+                except re.error:
+                    pass
+
+            if exc_matched:
+                logging.info(f"🛡️ [БОТ @{sender_username}] Найдено исключение: '{exc_clean}'. Сообщение НЕ будет удалено!")
+                return  # Прерываем выполнение, т.к. слово в белом списке
+
+        # === ШАГ 2: ПРОВЕРКА БАН-СЛОВ (если исключения не сработали) ===
         banwords = db_list_banwords()
         for word, delay in banwords:
             word_clean = word.strip()
@@ -254,17 +308,21 @@ async def owner_commands_handler(event):
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v2.4 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v2.5 активен!**\n\n"
             "**Просмотр логов:**\n"
             "• `sudo log` — Показать последние логи юзербота\n\n"
             "**Триггеры для людей (Regex):**\n"
             "• `sudo add_regex {выражение}`\n"
             "• `sudo del_regex {выражение}`\n"
             "• `sudo list_regex`\n\n"
-            "**Бан-слова для ботов (Banwords / Regex):**\n"
+            "**Бан-слова для ботов (Banwords):**\n"
             "• `sudo add_banword {слово} {секунды}`\n"
             "• `sudo del_banword {слово}`\n"
             "• `sudo list_banwords`\n\n"
+            "**🛡️ Исключения для ботов (Whitelist):**\n"
+            "• `sudo add_exc {слово}`\n"
+            "• `sudo del_exc {слово}`\n"
+            "• `sudo list_exc`\n\n"
             "**Задержки:**\n"
             f"• `sudo set_delay_user {delay_user}` (для людей)"
         )
@@ -316,6 +374,22 @@ async def owner_commands_handler(event):
             text = "🚫 **Список бан-слов для ботов:**\n" + (
                 "\n".join([f"• `{word}` | задержка: **{delay}** сек" for word, delay in items]) 
                 if items else "Пусто."
+            )
+            await event.reply(text)
+
+        # --- ОБРАБОТКА СЛОВ-ИСКЛЮЧЕНИЙ (БЕЛЫЙ СПИСОК) ---
+        elif subcommand in ["add_exc", "add_exception"] and value:
+            if db_add_exception(value): await event.reply(f"🛡️ Слово-исключение `{value}` добавлено.")
+            else: await event.reply(f"⚠️ Слово-исключение `{value}` уже есть в базе.")
+
+        elif subcommand in ["del_exc", "del_exception"] and value:
+            if db_del_exception(value.strip()): await event.reply(f"🗑 Слово-исключение `{value}` удалено.")
+            else: await event.reply(f"❌ Слово-исключение `{value}` не найдено.")
+
+        elif subcommand in ["list_exc", "list_exceptions"]:
+            items = db_list_exceptions()
+            text = "🛡️ **Список слов-исключений (защита от удаления):**\n" + (
+                "\n".join([f"• `{item}`" for item in items]) if items else "Пусто."
             )
             await event.reply(text)
             
