@@ -1,4 +1,4 @@
-# CODEVER: v3.5 | Sniper Userbot for LEX (Private Group Invite Link Join Fix & Triple Redundant Listener)
+# CODEVER: v3.7 | Sniper Userbot for LEX (Verbose Join Diagnostics & Entity Resolver)
 import os
 import re
 import sys
@@ -15,10 +15,15 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import (
     User, 
+    MessageService,
     ChatBannedRights,
     MessageActionChatJoinedByLink,
     MessageActionChatAddUser,
-    MessageActionChatJoinedByRequest
+    MessageActionChatJoinedByRequest,
+    UpdateNewChannelMessage,
+    UpdateNewMessage,
+    UpdateChannelParticipant,
+    ChannelParticipantSelf
 )
 from telethon.tl.functions.channels import EditBannedRequest
 
@@ -245,7 +250,6 @@ client = TelegramClient(
 
 # --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ БЕЗОПАСНОЙ ОТПРАВКИ ---
 async def safe_reply(event, text_content, filename="report.txt"):
-    """Отправляет ответ. Если текст больше 3500 символов — отправляет файлом без ошибок."""
     if len(text_content) > 3500:
         file_data = io.BytesIO(text_content.encode('utf-8'))
         file_data.name = filename
@@ -284,7 +288,7 @@ async def penalty_ban(chat_id, user_id):
     except Exception as e:
         logging.error(f"Не удалось забанить пользователя {user_id}: {e}")
 
-# --- ТАЙМАУТ КАПЧИ ПРИ ОТСУТСТВИИ ОТВЕТА (3 МИНУТЫ) ---
+# --- ТАЙМАУТ КАПЧИ (3 МИНУТЫ) ---
 async def captcha_timeout_worker(chat_id, user_id, user_name, captcha_msg_id):
     await asyncio.sleep(180)  # 3 минуты
     
@@ -302,57 +306,73 @@ async def captcha_timeout_worker(chat_id, user_id, user_name, captcha_msg_id):
         except Exception:
             pass
 
-# --- ТАЙМЕР АВТО-ОТКЛЮЧЕНИЯ РЕЖИМА РЕЙДА (2 МИНУТЫ ТИШИНЫ) ---
+# --- ТАЙМЕР АВТО-ОТКЛЮЧЕНИЯ РЕЖИМА РЕЙДА ---
 async def raid_reset_worker(chat_id):
     await asyncio.sleep(120)
     RAID_MODE_ACTIVE[chat_id] = False
     log_raid_event("RAID_STOPPED", 0, "", "", chat_id, "Анти-рейд режим авто-выключен (тишина 2 мин)")
     logging.info(f"🛡️ [Щит] Режим рейда для чата {chat_id} автоматически отключён.")
 
-# --- ЕДИНАЯ ТОЧКА ОБРАБОТКИ ВХОДА (С ДЕДУПЛИКАЦИЕЙ) ---
-async def trigger_join_pipeline(chat_id, user):
-    if not user or user.is_self or getattr(user, 'bot', False) or user.id == OWNER_ID:
+# --- ЕДИНАЯ ТОЧКА ОБРАБОТКИ ВХОДА УЧАСТНИКОВ ---
+async def trigger_join_pipeline(chat_id, user, is_test=False):
+    if not user:
         return
 
-    # Защита от дублирующих срабатываний (если события приходят из разных каналов связи)
-    dedup_key = (chat_id, user.id)
-    if dedup_key in JOIN_DEDUP:
-        return
-    JOIN_DEDUP.append(dedup_key)
+    logging.info(f"📥 [ВХОД ОБНАРУЖЕН] user_id={user.id} ({user.first_name}) in chat={chat_id}")
+
+    if not is_test:
+        if user.is_self:
+            logging.info(f"ℹ️ Пропуск своего аккаунта юзербота: {user.id}")
+            return
+        if getattr(user, 'bot', False):
+            logging.info(f"ℹ️ Пропуск бота: {user.id}")
+            return
+        if user.id == OWNER_ID:
+            logging.info(f"👑 [ПРОПУСК] Владелец зашел в чат (user_id={user.id}). Капча Владельцу не выдается!")
+            return
+
+        # Защита от дублирующих срабатываний (в пределах 10 сек)
+        dedup_key = (chat_id, user.id)
+        if dedup_key in JOIN_DEDUP:
+            logging.info(f"ℹ️ Повторное событие за 10с для user_id={user.id}, пропущено.")
+            return
+        JOIN_DEDUP.append(dedup_key)
 
     now = time.time()
     user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Участник"
     user_un = getattr(user, 'username', '') or ''
 
     # 1. ПРОВЕРКА СКОРОСТИ ВХОДА (ДЕТЕКЦИЯ РЕЙДА)
-    RECENT_JOINS.append((now, chat_id, user.id))
-    thresh_cnt = max(2, db_get_int('raid_threshold_count', 5))
-    thresh_sec = max(1, db_get_int('raid_threshold_seconds', 10))
+    if not is_test:
+        RECENT_JOINS.append((now, chat_id, user.id))
+        thresh_cnt = max(2, db_get_int('raid_threshold_count', 5))
+        thresh_sec = max(1, db_get_int('raid_threshold_seconds', 10))
 
-    recent_in_this_chat = [t for t, c, u in RECENT_JOINS if c == chat_id and now - t <= thresh_sec]
+        recent_in_this_chat = [t for t, c, u in RECENT_JOINS if c == chat_id and now - t <= thresh_sec]
 
-    if len(recent_in_this_chat) >= thresh_cnt:
-        if not RAID_MODE_ACTIVE.get(chat_id, False):
-            RAID_MODE_ACTIVE[chat_id] = True
-            log_raid_event("RAID_TRIGGERED", user.id, user_un, user_name, chat_id, f"ВКЛЮЧЁН РЕЖИМ РЕЙДА (>{thresh_cnt} входов за {thresh_sec}с)")
-            logging.warning(f"🚨 [Щит] Обнаружен рейд в чате {chat_id}! Включен массовый авто-бан!")
+        if len(recent_in_this_chat) >= thresh_cnt:
+            if not RAID_MODE_ACTIVE.get(chat_id, False):
+                RAID_MODE_ACTIVE[chat_id] = True
+                log_raid_event("RAID_TRIGGERED", user.id, user_un, user_name, chat_id, f"ВКЛЮЧЁН РЕЖИМ РЕЙДА (>{thresh_cnt} входов за {thresh_sec}с)")
+                logging.warning(f"🚨 [Щит] Обнаружен рейд в чате {chat_id}! Включен массовый авто-бан!")
 
-        if chat_id in RAID_RESET_TASKS:
-            RAID_RESET_TASKS[chat_id].cancel()
-        RAID_RESET_TASKS[chat_id] = asyncio.create_task(raid_reset_worker(chat_id))
+            if chat_id in RAID_RESET_TASKS:
+                RAID_RESET_TASKS[chat_id].cancel()
+            RAID_RESET_TASKS[chat_id] = asyncio.create_task(raid_reset_worker(chat_id))
 
-    # 2. ЕСЛИ РЕЖИМ РЕЙДА АКТИВЕН -> МГНОВЕННЫЙ БАН (БЕЗ КАПЧИ)
-    if RAID_MODE_ACTIVE.get(chat_id, False):
-        try:
-            await penalty_ban(chat_id, user.id)
-            log_raid_event("RAID_AUTO_BAN", user.id, user_un, user_name, chat_id, "Мгновенный авто-бан во время рейда")
-            logging.info(f"🔨 [Щит] Рейд-бот {user.id} ({user_name}) авто-забанен!")
-        except Exception as e:
-            logging.error(f"Ошибка авто-бана рейдера {user.id}: {e}")
-        return
+        # 2. ЕСЛИ РЕЖИМ РЕЙДА АКТИВЕН -> МГНОВЕННЫЙ БАН (БЕЗ КАПЧИ)
+        if RAID_MODE_ACTIVE.get(chat_id, False):
+            try:
+                await penalty_ban(chat_id, user.id)
+                log_raid_event("RAID_AUTO_BAN", user.id, user_un, user_name, chat_id, "Мгновенный авто-бан во время рейда")
+                logging.info(f"🔨 [Щит] Рейд-бот {user.id} ({user_name}) авто-забанен!")
+            except Exception as e:
+                logging.error(f"Ошибка авто-бана рейдера {user.id}: {e}")
+            return
 
     # 3. ПРОВЕРКА: ВКЛЮЧЕНА ЛИ КАПЧА
-    if db_get_int('captcha_enabled', 1) == 0:
+    if db_get_int('captcha_enabled', 1) == 0 and not is_test:
+        logging.info("ℹ️ Капча выключена в настройках, пропуск выдачи.")
         return
 
     # 4. ОБЫЧНЫЙ ВХОД -> МАТЕМАТИЧЕСКАЯ КАПЧА (ДО 30 ЕДИНИЦ)
@@ -367,8 +387,9 @@ async def trigger_join_pipeline(chat_id, user):
         ans = a - b
 
     mention = f"[{user_name}](tg://user?id={user.id})"
+    prefix = "🧪 **[ТЕСТОВЫЙ РЕЖИМ]**\n" if is_test else ""
     captcha_text = (
-        f"👋 Привет, {mention}!\n\n"
+        f"{prefix}👋 Привет, {mention}!\n\n"
         f"🛡️ **Для защиты реши пример за 3 минуты:**\n"
         f"👉 **`{a} {op} {b} = ?`**\n\n"
         f"• Напиши только **число** ответом в чат (у вас **2** попытки).\n"
@@ -377,74 +398,81 @@ async def trigger_join_pipeline(chat_id, user):
     )
 
     try:
-        msg = await client.send_message(chat_id, captcha_text)
+        # Гарантированное получение сущности чата перед отправкой
+        chat_entity = await client.get_entity(chat_id)
+        msg = await client.send_message(chat_entity, captcha_text)
         task = asyncio.create_task(captcha_timeout_worker(chat_id, user.id, user_name, msg.id))
         
         PENDING_CAPTCHAS[(chat_id, user.id)] = {
             "answer": ans,
-            "attempts_left": 2,  # 2 попытки на числа
+            "attempts_left": 2,
             "captcha_msg_id": msg.id,
             "warn_msg_ids": [],
             "join_time": now,
             "task": task
         }
         log_raid_event("CAPTCHA_SENT", user.id, user_un, user_name, chat_id, f"Пример: {a} {op} {b} = {ans}")
+        logging.info(f"✅ [КАПЧА ОТПРАВЛЕНА] Сообщение #{msg.id} успешно отправлено пользователю {user.id}")
     except Exception as e:
-        logging.error(f"Ошибка отправки капчи пользователю {user.id}: {e}")
+        logging.error(f"❌ [ОШИБКА ОТПРАВКИ КАПЧИ] chat={chat_id}, user={user.id}: {e}")
 
-# --- ПЕРЕХВАТЧИК #1: ОДОБРЕНИЕ ВХОДОВ И ОБЫЧНЫЕ СОБЫТИЯ ЧАТА ---
-@client.on(events.ChatAction)
-async def on_chat_action_join(event):
-    if not (event.user_joined or event.user_added):
+async def handle_raw_user_join(chat_id, user_id):
+    if db_get_int('shield_enabled', 1) == 0:
         return
+    try:
+        u = await client.get_entity(user_id)
+        if u:
+            await trigger_join_pipeline(chat_id, u)
+    except Exception as e:
+        logging.error(f"[RAW Join Fetch Error] user_id={user_id}: {e}")
 
+# --- ГЛУБОКИЙ RAW MTPROTO ПЕРЕХВАТЧИК ВСЕХ ТИПОВ ВХОДОВ ---
+@client.on(events.Raw)
+async def on_raw_telegram_update(update):
     if db_get_int('shield_enabled', 1) == 0:
         return
 
-    users = []
     try:
-        users = await event.get_users()
+        # 1. Перехват сообщений со служебными действиями (вход по ссылке, заявке, добавление)
+        if isinstance(update, (UpdateNewChannelMessage, UpdateNewMessage)):
+            msg = getattr(update, 'message', None)
+            if isinstance(msg, MessageService):
+                action = getattr(msg, 'action', None)
+                peer = getattr(msg, 'peer_id', None)
+                
+                chat_id = None
+                if hasattr(peer, 'channel_id'):
+                    chat_id = int(f"-100{peer.channel_id}")
+                elif hasattr(peer, 'chat_id'):
+                    chat_id = -peer.chat_id
+
+                if not chat_id:
+                    return
+
+                # Вход по инвайт-ссылке или заявке в приватную группу
+                if isinstance(action, (MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest)):
+                    from_id = getattr(msg, 'from_id', None)
+                    uid = getattr(from_id, 'user_id', None) if from_id else None
+                    if uid:
+                        asyncio.create_task(handle_raw_user_join(chat_id, uid))
+
+                # Добавление участников
+                elif isinstance(action, MessageActionChatAddUser):
+                    users_added = getattr(action, 'users', [])
+                    for uid in users_added:
+                        asyncio.create_task(handle_raw_user_join(chat_id, uid))
+
+        # 2. Перехват системных обновлений участников супергрупп (для админов)
+        elif isinstance(update, UpdateChannelParticipant):
+            cid = getattr(update, 'channel_id', None)
+            uid = getattr(update, 'user_id', None)
+            new_p = getattr(update, 'new_participant', None)
+
+            if cid and uid and new_p and not isinstance(new_p, ChannelParticipantSelf):
+                chat_id = int(f"-100{cid}")
+                asyncio.create_task(handle_raw_user_join(chat_id, uid))
     except Exception:
         pass
-
-    if not users and event.user_id:
-        try:
-            u = await client.get_entity(event.user_id)
-            if u: users = [u]
-        except Exception:
-            pass
-
-    for user in users:
-        await trigger_join_pipeline(event.chat_id, user)
-
-# --- ПЕРЕХВАТЧИК #2: СЛУЖЕБНЫЕ СООБЩЕНИЯ (ВХОД ПО ИНВАЙТ-ССЫЛКАМ В ПРИВАТНЫЕ ГРУППЫ) ---
-@client.on(events.NewMessage)
-async def on_service_message_join(event):
-    if db_get_int('shield_enabled', 1) == 0:
-        return
-
-    if event.message and event.message.action:
-        action = event.message.action
-        
-        # Вход по ссылке / заявке в приватный чат
-        if isinstance(action, (MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest)):
-            try:
-                user = await event.get_sender()
-                if user:
-                    await trigger_join_pipeline(event.chat_id, user)
-            except Exception as e:
-                logging.error(f"Ошибка получения зашедшего по ссылке: {e}")
-
-        # Обычное добавление пользователя
-        elif isinstance(action, MessageActionChatAddUser):
-            user_ids = getattr(action, 'users', [])
-            for uid in user_ids:
-                try:
-                    u = await client.get_entity(uid)
-                    if u:
-                        await trigger_join_pipeline(event.chat_id, u)
-                except Exception:
-                    pass
 
 # --- ГЛАВНАЯ ЛОГИКА ОБРАБОТКИ ОБЫЧНЫХ СООБЩЕНИЙ ---
 async def delete_after(event, delay, reason=""):
@@ -622,7 +650,7 @@ async def owner_commands_handler(event):
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v3.5 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v3.7 активен!**\n\n"
             "**🛡️ Система Щита (Анти-Рейд & Капча):**\n"
             "• `sudo shield` — Настройки Щита, Капчи, Порога рейда и Отчёты\n\n"
             "**Просмотр логов:**\n"
@@ -666,9 +694,16 @@ async def owner_commands_handler(event):
                     "🔧 **Команды Настройки:**\n"
                     "• `sudo shield on` | `sudo shield off` — Вкл/выкл весь Щит\n"
                     "• `sudo shield captcha on` | `sudo shield captcha off` — Вкл/выкл капчу\n"
-                    "• `sudo shield rate 2/10` — Порог авто-рейда (2 входа за 10 сек)"
+                    "• `sudo shield rate 2/10` — Порог авто-рейда (2 входа за 10 сек)\n"
+                    "• `sudo shield test` — Запустить тестовую капчу для себя"
                 )
                 return await safe_reply(event, shield_help)
+
+            # Мгновенный тест работы капчи
+            elif sub2 == "test":
+                me = await client.get_me()
+                await event.reply("🧪 **Запускаю тестовую капчу...**")
+                return await trigger_join_pipeline(event.chat_id, me, is_test=True)
 
             # 2. Вкл/выкл весь Щит
             elif sub2 in ["on", "1", "true", "вкл"]:
