@@ -1,4 +1,4 @@
-# CODEVER: v3.4 | Sniper Userbot for LEX (Fixed Telethon Join Handler & Fractional Raid Rate X/Y)
+# CODEVER: v3.5 | Sniper Userbot for LEX (Private Group Invite Link Join Fix & Triple Redundant Listener)
 import os
 import re
 import sys
@@ -13,7 +13,13 @@ from datetime import datetime
 from collections import deque
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import User, ChatBannedRights
+from telethon.tl.types import (
+    User, 
+    ChatBannedRights,
+    MessageActionChatJoinedByLink,
+    MessageActionChatAddUser,
+    MessageActionChatJoinedByRequest
+)
 from telethon.tl.functions.channels import EditBannedRequest
 
 # --- БУФЕР ЛОГОВ В ПАМЯТИ ДЛЯ КОМАНДЫ 'sudo log' ---
@@ -52,6 +58,7 @@ DB_NAME = "userbot_memory.db"
 # --- ГЛОБАЛЬНЫЕ СТРУКТУРЫ ДЛЯ АНТИРЕЙДА И КАПЧИ ---
 PENDING_CAPTCHAS = {}  # {(chat_id, user_id): {"answer": int, "attempts_left": int, "captcha_msg_id": int, "warn_msg_ids": list, "join_time": float, "task": Task}}
 RECENT_JOINS = deque(maxlen=200)  # [(timestamp, chat_id, user_id)]
+JOIN_DEDUP = deque(maxlen=300)    # [(chat_id, user_id)] - защита от повторных срабатываний
 RAID_MODE_ACTIVE = {}  # {chat_id: bool}
 RAID_RESET_TASKS = {}  # {chat_id: Task}
 
@@ -302,10 +309,16 @@ async def raid_reset_worker(chat_id):
     log_raid_event("RAID_STOPPED", 0, "", "", chat_id, "Анти-рейд режим авто-выключен (тишина 2 мин)")
     logging.info(f"🛡️ [Щит] Режим рейда для чата {chat_id} автоматически отключён.")
 
-# --- ВНУТРЕННЯЯ ОБРАБОТКА ОДНОГО ЗАШЕДШЕГО УЧАСТНИКА ---
-async def process_single_join(chat_id, user):
+# --- ЕДИНАЯ ТОЧКА ОБРАБОТКИ ВХОДА (С ДЕДУПЛИКАЦИЕЙ) ---
+async def trigger_join_pipeline(chat_id, user):
     if not user or user.is_self or getattr(user, 'bot', False) or user.id == OWNER_ID:
         return
+
+    # Защита от дублирующих срабатываний (если события приходят из разных каналов связи)
+    dedup_key = (chat_id, user.id)
+    if dedup_key in JOIN_DEDUP:
+        return
+    JOIN_DEDUP.append(dedup_key)
 
     now = time.time()
     user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Участник"
@@ -338,7 +351,7 @@ async def process_single_join(chat_id, user):
             logging.error(f"Ошибка авто-бана рейдера {user.id}: {e}")
         return
 
-    # 3. ПРОВЕРКА: ВКЛЮЧЕНА ЛИ КАПЧА (ЕСЛИ ВЫКЛЮЧЕНА — АНТИРЕЙД ВСЁ РАВНО РАБОТАЕТ ВЫШЕ!)
+    # 3. ПРОВЕРКА: ВКЛЮЧЕНА ЛИ КАПЧА
     if db_get_int('captcha_enabled', 1) == 0:
         return
 
@@ -379,17 +392,15 @@ async def process_single_join(chat_id, user):
     except Exception as e:
         logging.error(f"Ошибка отправки капчи пользователю {user.id}: {e}")
 
-# --- ОБРАБОТЧИК ВХОДА УЧАСТНИКОВ В ЧАТ (ЖЕЛЕЗОБЕТОННЫЙ TELETHON МЕТОД) ---
+# --- ПЕРЕХВАТЧИК #1: ОДОБРЕНИЕ ВХОДОВ И ОБЫЧНЫЕ СОБЫТИЯ ЧАТА ---
 @client.on(events.ChatAction)
-async def on_user_join(event):
+async def on_chat_action_join(event):
     if not (event.user_joined or event.user_added):
         return
 
-    # 0. ПРОВЕРКА: ВКЛЮЧЁН ЛИ ГЛАВНЫЙ ЩИТ
     if db_get_int('shield_enabled', 1) == 0:
         return
 
-    # Извлекаем ВСЕХ зашедших пользователей через официальный метод get_users()
     users = []
     try:
         users = await event.get_users()
@@ -399,18 +410,43 @@ async def on_user_join(event):
     if not users and event.user_id:
         try:
             u = await client.get_entity(event.user_id)
-            if u:
-                users = [u]
+            if u: users = [u]
         except Exception:
             pass
 
-    if not users:
+    for user in users:
+        await trigger_join_pipeline(event.chat_id, user)
+
+# --- ПЕРЕХВАТЧИК #2: СЛУЖЕБНЫЕ СООБЩЕНИЯ (ВХОД ПО ИНВАЙТ-ССЫЛКАМ В ПРИВАТНЫЕ ГРУППЫ) ---
+@client.on(events.NewMessage)
+async def on_service_message_join(event):
+    if db_get_int('shield_enabled', 1) == 0:
         return
 
-    for user in users:
-        await process_single_join(event.chat_id, user)
+    if event.message and event.message.action:
+        action = event.message.action
+        
+        # Вход по ссылке / заявке в приватный чат
+        if isinstance(action, (MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest)):
+            try:
+                user = await event.get_sender()
+                if user:
+                    await trigger_join_pipeline(event.chat_id, user)
+            except Exception as e:
+                logging.error(f"Ошибка получения зашедшего по ссылке: {e}")
 
-# --- ГЛАВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ ---
+        # Обычное добавление пользователя
+        elif isinstance(action, MessageActionChatAddUser):
+            user_ids = getattr(action, 'users', [])
+            for uid in user_ids:
+                try:
+                    u = await client.get_entity(uid)
+                    if u:
+                        await trigger_join_pipeline(event.chat_id, u)
+                except Exception:
+                    pass
+
+# --- ГЛАВНАЯ ЛОГИКА ОБРАБОТКИ ОБЫЧНЫХ СООБЩЕНИЙ ---
 async def delete_after(event, delay, reason=""):
     try:
         await asyncio.sleep(delay)
@@ -586,7 +622,7 @@ async def owner_commands_handler(event):
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v3.4 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v3.5 активен!**\n\n"
             "**🛡️ Система Щита (Анти-Рейд & Капча):**\n"
             "• `sudo shield` — Настройки Щита, Капчи, Порога рейда и Отчёты\n\n"
             "**Просмотр логов:**\n"
@@ -653,7 +689,7 @@ async def owner_commands_handler(event):
                     db_set('captcha_enabled', '0')
                     return await event.reply("❌ Математическая капча **ВЫКЛЮЧЕНА** (Анти-рейд защита остаётся активной!).")
 
-            # 4. Порог скорости авто-рейда с поддержкой дробного формата (2/10 или 2 10)
+            # 4. Порог скорости авто-рейда (2/10 или 2 10)
             elif sub2 in ["rate", "threshold"] and val2:
                 match = re.match(r"^(\d+)[/\s,]+(\d+)$", val2)
                 if match:
