@@ -1,4 +1,4 @@
-# CODEVER: v3.3 | Sniper Userbot for LEX (Clean Shield: Toggles, Rate from 2 & Independent Anti-Raid)
+# CODEVER: v3.4 | Sniper Userbot for LEX (Fixed Telethon Join Handler & Fractional Raid Rate X/Y)
 import os
 import re
 import sys
@@ -104,11 +104,12 @@ def init_db():
     except sqlite3.OperationalError:
         pass
         
-    # Дефолтные минималистичные настройки
+    # Дефолтные настройки
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('delay_user_command', '5')")
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shield_enabled', '1')")
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('captcha_enabled', '1')")
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('raid_threshold_count', '5')")
+    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('raid_threshold_seconds', '10')")
     conn.commit()
     conn.close()
     logging.info("База данных инициализирована и защищена.")
@@ -278,13 +279,13 @@ async def penalty_ban(chat_id, user_id):
 
 # --- ТАЙМАУТ КАПЧИ ПРИ ОТСУТСТВИИ ОТВЕТА (3 МИНУТЫ) ---
 async def captcha_timeout_worker(chat_id, user_id, user_name, captcha_msg_id):
-    await asyncio.sleep(180)  # Дефолт 3 минуты
+    await asyncio.sleep(180)  # 3 минуты
     
     key = (chat_id, user_id)
     if key in PENDING_CAPTCHAS:
         captcha_data = PENDING_CAPTCHAS.pop(key)
         
-        await penalty_mute(chat_id, user_id)  # Дефолт за таймаут — МЬЮТ
+        await penalty_mute(chat_id, user_id)  # За таймаут — МЬЮТ
         log_raid_event("CAPTCHA_TIMEOUT", user_id, "", user_name, chat_id, "Наказание: МЬЮТ (не ответил за 3 минуты)")
         logging.info(f"🛡️ [Щит] Пользователь {user_id} ({user_name}) замьючен за таймаут капчи.")
         
@@ -301,37 +302,26 @@ async def raid_reset_worker(chat_id):
     log_raid_event("RAID_STOPPED", 0, "", "", chat_id, "Анти-рейд режим авто-выключен (тишина 2 мин)")
     logging.info(f"🛡️ [Щит] Режим рейда для чата {chat_id} автоматически отключён.")
 
-# --- ОБРАБОТЧИК ВХОДА УЧАСТНИКОВ В ЧАТ ---
-@client.on(events.ChatAction)
-async def on_user_join(event):
-    if not (event.user_joined or event.user_added):
-        return
-
-    # 0. ПРОВЕРКА: ВКЛЮЧЁН ЛИ ГЛАВНЫЙ ЩИТ
-    if db_get_int('shield_enabled', 1) == 0:
-        return  # Весь Щит полностью выключен
-
-    chat_id = event.chat_id
-    user = await event.get_user()
-    if not user or user.is_self or getattr(user, 'bot', False):
-        return
-
-    if user.id == OWNER_ID:
+# --- ВНУТРЕННЯЯ ОБРАБОТКА ОДНОГО ЗАШЕДШЕГО УЧАСТНИКА ---
+async def process_single_join(chat_id, user):
+    if not user or user.is_self or getattr(user, 'bot', False) or user.id == OWNER_ID:
         return
 
     now = time.time()
     user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Участник"
     user_un = getattr(user, 'username', '') or ''
 
-    # 1. ПРОВЕРКА СКОРОСТИ ВХОДА (ДЕТЕКЦИЯ РЕЙДА - ПОРОГ ОТ 2 ВХОДОВ)
+    # 1. ПРОВЕРКА СКОРОСТИ ВХОДА (ДЕТЕКЦИЯ РЕЙДА)
     RECENT_JOINS.append((now, chat_id, user.id))
-    recent_in_this_chat = [t for t, c, u in RECENT_JOINS if c == chat_id and now - t <= 10]
+    thresh_cnt = max(2, db_get_int('raid_threshold_count', 5))
+    thresh_sec = max(1, db_get_int('raid_threshold_seconds', 10))
 
-    threshold = max(2, db_get_int('raid_threshold_count', 5))
-    if len(recent_in_this_chat) >= threshold:
+    recent_in_this_chat = [t for t, c, u in RECENT_JOINS if c == chat_id and now - t <= thresh_sec]
+
+    if len(recent_in_this_chat) >= thresh_cnt:
         if not RAID_MODE_ACTIVE.get(chat_id, False):
             RAID_MODE_ACTIVE[chat_id] = True
-            log_raid_event("RAID_TRIGGERED", user.id, user_un, user_name, chat_id, f"ВКЛЮЧЁН РЕЖИМ РЕЙДА (>{threshold} входов за 10с)")
+            log_raid_event("RAID_TRIGGERED", user.id, user_un, user_name, chat_id, f"ВКЛЮЧЁН РЕЖИМ РЕЙДА (>{thresh_cnt} входов за {thresh_sec}с)")
             logging.warning(f"🚨 [Щит] Обнаружен рейд в чате {chat_id}! Включен массовый авто-бан!")
 
         if chat_id in RAID_RESET_TASKS:
@@ -388,6 +378,37 @@ async def on_user_join(event):
         log_raid_event("CAPTCHA_SENT", user.id, user_un, user_name, chat_id, f"Пример: {a} {op} {b} = {ans}")
     except Exception as e:
         logging.error(f"Ошибка отправки капчи пользователю {user.id}: {e}")
+
+# --- ОБРАБОТЧИК ВХОДА УЧАСТНИКОВ В ЧАТ (ЖЕЛЕЗОБЕТОННЫЙ TELETHON МЕТОД) ---
+@client.on(events.ChatAction)
+async def on_user_join(event):
+    if not (event.user_joined or event.user_added):
+        return
+
+    # 0. ПРОВЕРКА: ВКЛЮЧЁН ЛИ ГЛАВНЫЙ ЩИТ
+    if db_get_int('shield_enabled', 1) == 0:
+        return
+
+    # Извлекаем ВСЕХ зашедших пользователей через официальный метод get_users()
+    users = []
+    try:
+        users = await event.get_users()
+    except Exception:
+        pass
+
+    if not users and event.user_id:
+        try:
+            u = await client.get_entity(event.user_id)
+            if u:
+                users = [u]
+        except Exception:
+            pass
+
+    if not users:
+        return
+
+    for user in users:
+        await process_single_join(event.chat_id, user)
 
 # --- ГЛАВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ ---
 async def delete_after(event, delay, reason=""):
@@ -565,7 +586,7 @@ async def owner_commands_handler(event):
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v3.3 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v3.4 активен!**\n\n"
             "**🛡️ Система Щита (Анти-Рейд & Капча):**\n"
             "• `sudo shield` — Настройки Щита, Капчи, Порога рейда и Отчёты\n\n"
             "**Просмотр логов:**\n"
@@ -585,13 +606,14 @@ async def owner_commands_handler(event):
         # --- ЕДИНАЯ КОМАНДА УПРАВЛЕНИЯ ЩИТОМ (SUDO SHIELD) ---
         if subcommand == "shield":
             sub2 = parts[2].lower() if len(parts) > 2 else None
-            val2 = parts[3].strip() if len(parts) > 3 else None
+            val2 = " ".join(parts[3:]).strip() if len(parts) > 3 else None
 
-            # 1. Если просто 'sudo shield' — выводим компактное меню и статус
+            # 1. Показ статуса и меню
             if not sub2:
                 shield_on = db_get_int('shield_enabled', 1) == 1
                 captcha_on = db_get_int('captcha_enabled', 1) == 1
-                raid_thresh = max(2, db_get_int('raid_threshold_count', 5))
+                thresh_cnt = max(2, db_get_int('raid_threshold_count', 5))
+                thresh_sec = max(1, db_get_int('raid_threshold_seconds', 10))
 
                 shield_status = "ВКЛЮЧЁН ✅" if shield_on else "ВЫКЛЮЧЕН ❌"
                 captcha_status = "ВКЛЮЧЕНА ✅" if captcha_on else "ВЫКЛЮЧЕНА ❌"
@@ -601,18 +623,18 @@ async def owner_commands_handler(event):
                     "⚙️ **Текущий статус:**\n"
                     f"• Главный Щит: **{shield_status}**\n"
                     f"• Математическая Капча: **{captcha_status}**\n"
-                    f"• Порог авто-рейда: `{raid_thresh}` входов / 10 сек\n\n"
+                    f"• Порог авто-рейда: `{thresh_cnt}` входов / `{thresh_sec}` сек\n\n"
                     "📊 **Отчёты и Логи:**\n"
                     "• `sudo shield report` — Статистика капчи и авто-рейдов\n"
                     "• `sudo shield logs` — Последние 50 событий защиты\n\n"
                     "🔧 **Команды Настройки:**\n"
                     "• `sudo shield on` | `sudo shield off` — Вкл/выкл весь Щит\n"
                     "• `sudo shield captcha on` | `sudo shield captcha off` — Вкл/выкл капчу\n"
-                    "• `sudo shield rate {число}` — Порог авто-рейда (от 2 и выше)"
+                    "• `sudo shield rate 2/10` — Порог авто-рейда (2 входа за 10 сек)"
                 )
                 return await safe_reply(event, shield_help)
 
-            # 2. Вкл/выкл главный Щит
+            # 2. Вкл/выкл весь Щит
             elif sub2 in ["on", "1", "true", "вкл"]:
                 db_set('shield_enabled', '1')
                 return await event.reply("✅ Главный Щит **ВКЛЮЧЁН**.")
@@ -621,7 +643,7 @@ async def owner_commands_handler(event):
                 db_set('shield_enabled', '0')
                 return await event.reply("❌ Главный Щит полностью **ВЫКЛЮЧЁН**.")
 
-            # 3. Вкл/выкл только Капчу (Анти-Рейд продолжает работать!)
+            # 3. Вкл/выкл Капчу (Анти-Рейд остаётся активным)
             elif sub2 == "captcha" and val2:
                 v = val2.lower()
                 if v in ["on", "1", "true", "вкл"]:
@@ -631,15 +653,26 @@ async def owner_commands_handler(event):
                     db_set('captcha_enabled', '0')
                     return await event.reply("❌ Математическая капча **ВЫКЛЮЧЕНА** (Анти-рейд защита остаётся активной!).")
 
-            # 4. Настройка порога скорости авто-рейда (от 2 выходов)
+            # 4. Порог скорости авто-рейда с поддержкой дробного формата (2/10 или 2 10)
             elif sub2 in ["rate", "threshold"] and val2:
-                if val2.isdigit() and int(val2) >= 2:
+                match = re.match(r"^(\d+)[/\s,]+(\d+)$", val2)
+                if match:
+                    cnt = int(match.group(1))
+                    sec = int(match.group(2))
+                    if cnt >= 2 and sec >= 1:
+                        db_set('raid_threshold_count', cnt)
+                        db_set('raid_threshold_seconds', sec)
+                        return await event.reply(f"✅ Порог авто-рейда изменён: **{cnt}** входов за **{sec}** сек.")
+                    else:
+                        return await event.reply("❌ Количество входов должно быть от 2, а секунды от 1!")
+                elif val2.isdigit() and int(val2) >= 2:
                     db_set('raid_threshold_count', val2)
-                    return await event.reply(f"⏱ Порог срабатывания авто-рейда изменён на **{val2}** входов за 10 сек.")
+                    curr_sec = db_get_int('raid_threshold_seconds', 10)
+                    return await event.reply(f"✅ Порог авто-рейда изменён: **{val2}** входов за **{curr_sec}** сек.")
                 else:
-                    return await event.reply("❌ Порог должен быть числом **от 2 и выше**!")
+                    return await event.reply("❌ Укажите значение в формате `2/10` (2 входа за 10 сек)!")
 
-            # 5. Отчёт статистики
+            # 5. Отчёт
             elif sub2 in ["report", "stat", "stats"]:
                 conn = sqlite3.connect(DB_NAME)
                 cur = conn.cursor()
@@ -671,7 +704,7 @@ async def owner_commands_handler(event):
                 )
                 return await safe_reply(event, report, filename="shield_report.txt")
 
-            # 6. Логи событий
+            # 6. Логи
             elif sub2 in ["logs", "log"]:
                 conn = sqlite3.connect(DB_NAME)
                 cur = conn.cursor()
