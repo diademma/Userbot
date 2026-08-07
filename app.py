@@ -1,9 +1,10 @@
-# CODEVER: v2.7 | Sniper Userbot for LEX (Full File with JSON Raid Generator)
+# CODEVER: v3.3 | Sniper Userbot for LEX (Clean Shield: Toggles, Rate from 2 & Independent Anti-Raid)
 import os
 import re
 import sys
 import io
-import json
+import time
+import random
 import asyncio
 import sqlite3
 import logging
@@ -12,7 +13,8 @@ from datetime import datetime
 from collections import deque
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import User
+from telethon.tl.types import User, ChatBannedRights
+from telethon.tl.functions.channels import EditBannedRequest
 
 # --- БУФЕР ЛОГОВ В ПАМЯТИ ДЛЯ КОМАНДЫ 'sudo log' ---
 class MemoryLogHandler(logging.Handler):
@@ -27,7 +29,7 @@ class MemoryLogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
-    def get_logs(self, limit=15):
+    def get_logs(self, limit=20):
         logs = list(self.buffer)
         return logs[-limit:] if logs else []
 
@@ -47,6 +49,12 @@ OWNER_ID = 5421909121
 LEX_BOT_USERNAME = "my_LEX_superbot"
 DB_NAME = "userbot_memory.db"
 
+# --- ГЛОБАЛЬНЫЕ СТРУКТУРЫ ДЛЯ АНТИРЕЙДА И КАПЧИ ---
+PENDING_CAPTCHAS = {}  # {(chat_id, user_id): {"answer": int, "attempts_left": int, "captcha_msg_id": int, "warn_msg_ids": list, "join_time": float, "task": Task}}
+RECENT_JOINS = deque(maxlen=200)  # [(timestamp, chat_id, user_id)]
+RAID_MODE_ACTIVE = {}  # {chat_id: bool}
+RAID_RESET_TASKS = {}  # {chat_id: Task}
+
 # --- СОХРАНЕНИЕ БД В GITHUB ---
 def save_db_to_git():
     try:
@@ -64,7 +72,7 @@ def save_db_to_git():
     except Exception as e:
         logging.warning(f"Не удалось сохранить базу данных в Git: {e}")
 
-# --- ПОДКЛЮЧЕНИЕ И АВТО-ОЧИСТКА БД SQLITE ---
+# --- ИНИЦИАЛИЗАЦИЯ БД ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -72,6 +80,20 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS bot_banwords (id INTEGER PRIMARY KEY, word TEXT UNIQUE, delay INTEGER DEFAULT 45)")
     cur.execute("CREATE TABLE IF NOT EXISTS bot_exceptions (id INTEGER PRIMARY KEY, word TEXT UNIQUE)")
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+    
+    # Таблица логов анти-рейд активности
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS raid_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            user_id INTEGER,
+            username TEXT,
+            full_name TEXT,
+            chat_id INTEGER,
+            details TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     
     cur.execute("DELETE FROM bot_banwords WHERE word IS NULL OR TRIM(word) = '' OR word LIKE '%(д|н|м%'")
     cur.execute("DELETE FROM regex_patterns WHERE pattern IS NULL OR TRIM(pattern) = ''")
@@ -82,11 +104,28 @@ def init_db():
     except sqlite3.OperationalError:
         pass
         
+    # Дефолтные минималистичные настройки
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('delay_user_command', '5')")
+    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shield_enabled', '1')")
+    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('captcha_enabled', '1')")
+    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('raid_threshold_count', '5')")
     conn.commit()
     conn.close()
     logging.info("База данных инициализирована и защищена.")
 
+def log_raid_event(event_type, user_id, username, full_name, chat_id, details=""):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("""
+            INSERT INTO raid_logs (event_type, user_id, username, full_name, chat_id, details)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (event_type, user_id, username, full_name, chat_id, details))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Ошибка логирования анти-рейда в БД: {e}")
+
+# --- ФУНКЦИИ БД ---
 def db_add_regex(pattern):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -171,7 +210,7 @@ def db_list_exceptions():
 
 def db_set(key, value):
     conn = sqlite3.connect(DB_NAME)
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
     save_db_to_git()
@@ -196,6 +235,161 @@ client = TelegramClient(
     api_hash=API_HASH
 )
 
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ БЕЗОПАСНОЙ ОТПРАВКИ ---
+async def safe_reply(event, text_content, filename="report.txt"):
+    """Отправляет ответ. Если текст больше 3500 символов — отправляет файлом без ошибок."""
+    if len(text_content) > 3500:
+        file_data = io.BytesIO(text_content.encode('utf-8'))
+        file_data.name = filename
+        caption = text_content[:300] + f"\n\n⚠️ **Отчёт слишком длинный ({len(text_content)} симв.), прикреплён полным файлом {filename}!**"
+        await event.reply(caption, file=file_data)
+    else:
+        await event.reply(text_content)
+
+# --- ИСПОЛНИТЕЛИ НАКАЗАНИЙ ---
+async def penalty_kick(chat_id, user_id):
+    try:
+        await client.kick_participant(chat_id, user_id)
+    except Exception as e:
+        logging.error(f"Не удалось кикнуть пользователя {user_id}: {e}")
+
+async def penalty_mute(chat_id, user_id):
+    try:
+        mute_rights = ChatBannedRights(
+            until_date=None,
+            send_messages=True,
+            send_media=True,
+            send_stickers=True,
+            send_gifs=True,
+            send_games=True,
+            send_inline=True,
+            embed_link_previews=True
+        )
+        await client(EditBannedRequest(channel=chat_id, participant=user_id, banned_rights=mute_rights))
+    except Exception as e:
+        logging.error(f"Не удалось замьютить пользователя {user_id}: {e}")
+
+async def penalty_ban(chat_id, user_id):
+    try:
+        ban_rights = ChatBannedRights(until_date=None, view_messages=True)
+        await client(EditBannedRequest(channel=chat_id, participant=user_id, banned_rights=ban_rights))
+    except Exception as e:
+        logging.error(f"Не удалось забанить пользователя {user_id}: {e}")
+
+# --- ТАЙМАУТ КАПЧИ ПРИ ОТСУТСТВИИ ОТВЕТА (3 МИНУТЫ) ---
+async def captcha_timeout_worker(chat_id, user_id, user_name, captcha_msg_id):
+    await asyncio.sleep(180)  # Дефолт 3 минуты
+    
+    key = (chat_id, user_id)
+    if key in PENDING_CAPTCHAS:
+        captcha_data = PENDING_CAPTCHAS.pop(key)
+        
+        await penalty_mute(chat_id, user_id)  # Дефолт за таймаут — МЬЮТ
+        log_raid_event("CAPTCHA_TIMEOUT", user_id, "", user_name, chat_id, "Наказание: МЬЮТ (не ответил за 3 минуты)")
+        logging.info(f"🛡️ [Щит] Пользователь {user_id} ({user_name}) замьючен за таймаут капчи.")
+        
+        try:
+            msgs_to_del = [captcha_msg_id] + captcha_data.get("warn_msg_ids", [])
+            await client.delete_messages(chat_id, msgs_to_del)
+        except Exception:
+            pass
+
+# --- ТАЙМЕР АВТО-ОТКЛЮЧЕНИЯ РЕЖИМА РЕЙДА (2 МИНУТЫ ТИШИНЫ) ---
+async def raid_reset_worker(chat_id):
+    await asyncio.sleep(120)
+    RAID_MODE_ACTIVE[chat_id] = False
+    log_raid_event("RAID_STOPPED", 0, "", "", chat_id, "Анти-рейд режим авто-выключен (тишина 2 мин)")
+    logging.info(f"🛡️ [Щит] Режим рейда для чата {chat_id} автоматически отключён.")
+
+# --- ОБРАБОТЧИК ВХОДА УЧАСТНИКОВ В ЧАТ ---
+@client.on(events.ChatAction)
+async def on_user_join(event):
+    if not (event.user_joined or event.user_added):
+        return
+
+    # 0. ПРОВЕРКА: ВКЛЮЧЁН ЛИ ГЛАВНЫЙ ЩИТ
+    if db_get_int('shield_enabled', 1) == 0:
+        return  # Весь Щит полностью выключен
+
+    chat_id = event.chat_id
+    user = await event.get_user()
+    if not user or user.is_self or getattr(user, 'bot', False):
+        return
+
+    if user.id == OWNER_ID:
+        return
+
+    now = time.time()
+    user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Участник"
+    user_un = getattr(user, 'username', '') or ''
+
+    # 1. ПРОВЕРКА СКОРОСТИ ВХОДА (ДЕТЕКЦИЯ РЕЙДА - ПОРОГ ОТ 2 ВХОДОВ)
+    RECENT_JOINS.append((now, chat_id, user.id))
+    recent_in_this_chat = [t for t, c, u in RECENT_JOINS if c == chat_id and now - t <= 10]
+
+    threshold = max(2, db_get_int('raid_threshold_count', 5))
+    if len(recent_in_this_chat) >= threshold:
+        if not RAID_MODE_ACTIVE.get(chat_id, False):
+            RAID_MODE_ACTIVE[chat_id] = True
+            log_raid_event("RAID_TRIGGERED", user.id, user_un, user_name, chat_id, f"ВКЛЮЧЁН РЕЖИМ РЕЙДА (>{threshold} входов за 10с)")
+            logging.warning(f"🚨 [Щит] Обнаружен рейд в чате {chat_id}! Включен массовый авто-бан!")
+
+        if chat_id in RAID_RESET_TASKS:
+            RAID_RESET_TASKS[chat_id].cancel()
+        RAID_RESET_TASKS[chat_id] = asyncio.create_task(raid_reset_worker(chat_id))
+
+    # 2. ЕСЛИ РЕЖИМ РЕЙДА АКТИВЕН -> МГНОВЕННЫЙ БАН (БЕЗ КАПЧИ)
+    if RAID_MODE_ACTIVE.get(chat_id, False):
+        try:
+            await penalty_ban(chat_id, user.id)
+            log_raid_event("RAID_AUTO_BAN", user.id, user_un, user_name, chat_id, "Мгновенный авто-бан во время рейда")
+            logging.info(f"🔨 [Щит] Рейд-бот {user.id} ({user_name}) авто-забанен!")
+        except Exception as e:
+            logging.error(f"Ошибка авто-бана рейдера {user.id}: {e}")
+        return
+
+    # 3. ПРОВЕРКА: ВКЛЮЧЕНА ЛИ КАПЧА (ЕСЛИ ВЫКЛЮЧЕНА — АНТИРЕЙД ВСЁ РАВНО РАБОТАЕТ ВЫШЕ!)
+    if db_get_int('captcha_enabled', 1) == 0:
+        return
+
+    # 4. ОБЫЧНЫЙ ВХОД -> МАТЕМАТИЧЕСКАЯ КАПЧА (ДО 30 ЕДИНИЦ)
+    op = random.choice(['+', '-'])
+    if op == '+':
+        a = random.randint(1, 15)
+        b = random.randint(1, 15)
+        ans = a + b
+    else:
+        a = random.randint(10, 30)
+        b = random.randint(1, a)
+        ans = a - b
+
+    mention = f"[{user_name}](tg://user?id={user.id})"
+    captcha_text = (
+        f"👋 Привет, {mention}!\n\n"
+        f"🛡️ **Для защиты реши пример за 3 минуты:**\n"
+        f"👉 **`{a} {op} {b} = ?`**\n\n"
+        f"• Напиши только **число** ответом в чат (у вас **2** попытки).\n"
+        f"• Напишешь **текстом** вместо числа — КИК!\n"
+        f"• Ошибся числом 2 раза или таймаут — МЬЮТ!"
+    )
+
+    try:
+        msg = await client.send_message(chat_id, captcha_text)
+        task = asyncio.create_task(captcha_timeout_worker(chat_id, user.id, user_name, msg.id))
+        
+        PENDING_CAPTCHAS[(chat_id, user.id)] = {
+            "answer": ans,
+            "attempts_left": 2,  # 2 попытки на числа
+            "captcha_msg_id": msg.id,
+            "warn_msg_ids": [],
+            "join_time": now,
+            "task": task
+        }
+        log_raid_event("CAPTCHA_SENT", user.id, user_un, user_name, chat_id, f"Пример: {a} {op} {b} = {ans}")
+    except Exception as e:
+        logging.error(f"Ошибка отправки капчи пользователю {user.id}: {e}")
+
+# --- ГЛАВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ ---
 async def delete_after(event, delay, reason=""):
     try:
         await asyncio.sleep(delay)
@@ -214,16 +408,89 @@ async def message_handler(event):
     if not sender:
         return
 
+    chat_id = event.chat_id
+    user_id = sender.id
     is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
     sender_username = getattr(sender, 'username', '') or 'unknown'
+    user_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Участник"
 
+    # Игнорируем Лекса и sudo-команды
     if sender_username.lower() == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo"):
         return
+
+    # === ПРОВЕРКА ОТВЕТА НА КАПЧУ ===
+    captcha_key = (chat_id, user_id)
+    if captcha_key in PENDING_CAPTCHAS:
+        captcha_data = PENDING_CAPTCHAS[captcha_key]
+        expected_ans = captcha_data["answer"]
+
+        # 1. ВАРИАНТ: НАПИСАЛ ТЕКСТОМ ВМЕСТО ЧИСЛА -> КИК
+        if not text.isdigit():
+            captcha_data["task"].cancel()
+            del PENDING_CAPTCHAS[captcha_key]
+            
+            log_raid_event("CAPTCHA_TEXT_FAIL", user_id, sender_username, user_name, chat_id, f"Наказание: КИК (написал текст: '{text[:20]}')")
+            await penalty_kick(chat_id, user_id)
+            
+            try:
+                msgs_to_del = [captcha_data["captcha_msg_id"], event.id] + captcha_data.get("warn_msg_ids", [])
+                await client.delete_messages(chat_id, msgs_to_del)
+            except Exception:
+                pass
+            return
+
+        # 2. ВАРИАНТ: НАПИСАЛ ЧИСЛО
+        val = int(text)
+        if val == expected_ans:
+            # 2.1 ВЕРНЫЙ ОТВЕТ -> СНИМАЕМ КАПЧУ И ЧИСТИМ ЧАТ
+            captcha_data["task"].cancel()
+            del PENDING_CAPTCHAS[captcha_key]
+            
+            log_raid_event("CAPTCHA_PASSED", user_id, sender_username, user_name, chat_id, f"Верный ответ: {expected_ans}")
+            
+            try:
+                msgs_to_del = [captcha_data["captcha_msg_id"], event.id] + captcha_data.get("warn_msg_ids", [])
+                await client.delete_messages(chat_id, msgs_to_del)
+            except Exception:
+                pass
+            return
+        else:
+            # 2.2 ОШИБСЯ ЧИСЛОМ -> ДАЕМ ПОПЫТКУ ИЛИ МЬЮТИМ
+            captcha_data["attempts_left"] -= 1
+            log_raid_event("CAPTCHA_WRONG_NUMBER", user_id, sender_username, user_name, chat_id, f"Ошибся числом (ввел {val}, осталось: {captcha_data['attempts_left']})")
+            
+            if captcha_data["attempts_left"] > 0:
+                # ВТОРАЯ ПОПЫТКА
+                try:
+                    warn_msg = await client.send_message(
+                        chat_id, 
+                        f"⚠️ [{user_name}](tg://user?id={user_id}), неправильный ответ! У вас осталась еще **{captcha_data['attempts_left']}** попытка."
+                    )
+                    captcha_data.setdefault("warn_msg_ids", []).append(warn_msg.id)
+                    await client.delete_messages(chat_id, event.id)
+                except Exception:
+                    pass
+                return
+            else:
+                # ПОПЫТКИ ИСЧЕРПАНЫ -> МЬЮТ
+                captcha_data["task"].cancel()
+                del PENDING_CAPTCHAS[captcha_key]
+                
+                log_raid_event("CAPTCHA_FAIL_NUMBERS", user_id, sender_username, user_name, chat_id, "Наказание: МЬЮТ (исчерпал 2 попытки чисел)")
+                await penalty_mute(chat_id, user_id)
+                
+                try:
+                    msgs_to_del = [captcha_data["captcha_msg_id"], event.id] + captcha_data.get("warn_msg_ids", [])
+                    await client.delete_messages(chat_id, msgs_to_del)
+                except Exception:
+                    pass
+                return
 
     if is_bot:
         short_text = text[:35].replace('\n', ' ')
         logging.info(f"📩 Бот @{sender_username} прислал: '{short_text}...'")
 
+    # --- СЦЕНАРИЙ 1: Сообщение от ЧЕЛОВЕКА ---
     if not is_bot:
         patterns = db_list_regex()
         for pattern in patterns:
@@ -239,6 +506,8 @@ async def message_handler(event):
                     return
             except re.error as e:
                 logging.error(f"Ошибка в регексе '{pattern_clean}': {e}")
+
+    # --- СЦЕНАРИЙ 2: Сообщение от БОТА ---
     else:
         exceptions = db_list_exceptions()
         for exc_word in exceptions:
@@ -285,7 +554,6 @@ async def message_handler(event):
                 return
 
 # --- ОБРАБОТЧИК КОМАНД SUDO ---
-
 @client.on(events.NewMessage(from_users=OWNER_ID, pattern=r"^sudo.*"))
 async def owner_commands_handler(event):
     parts = event.raw_text.split()
@@ -293,103 +561,149 @@ async def owner_commands_handler(event):
     subcommand = parts[1] if len(parts) > 1 else None
     value = " ".join(parts[2:]) if len(parts) > 2 else None
 
+    # --- ЛАКОНИЧНОЕ ГЛАВНОЕ МЕНЮ SUDO ---
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v2.7 активен!**\n\n"
-            "**⚡ Очистка Ботнета (Anti-Raid):**\n"
-            "• `sudo raid` — Собрать ботов за СЕГОДНЯ и отправить .json файл\n"
-            "• `sudo raid YYYY-MM-DD` — Собрать ботов за конкретную дату\n\n"
+            "🛡️ **LEX Sniper Userbot v3.3 активен!**\n\n"
+            "**🛡️ Система Щита (Анти-Рейд & Капча):**\n"
+            "• `sudo shield` — Настройки Щита, Капчи, Порога рейда и Отчёты\n\n"
             "**Просмотр логов:**\n"
-            "• `sudo log` — Показать последние логи юзербота\n\n"
+            "• `sudo log` — Показать консольные логи юзербота\n\n"
             "**Триггеры для людей (Regex):**\n"
             "• `sudo add_regex {выражение}` | `sudo del_regex` | `sudo list_regex`\n\n"
             "**Бан-слова для ботов (Banwords):**\n"
             "• `sudo add_banword {слово} {сек}` | `sudo del_banword` | `sudo list_banwords`\n\n"
             "**🛡️ Исключения для ботов (Whitelist):**\n"
-            "• `sudo add_exc {слово}` | `sudo del_exc` | `sudo list_exc`"
+            "• `sudo add_exc {слово}` | `sudo del_exc` | `sudo list_exc`\n\n"
+            "**Задержки:**\n"
+            f"• `sudo set_delay_user {delay_user}` (для людей)"
         )
-        return await event.reply(help_text)
+        return await safe_reply(event, help_text)
 
     try:
-        # 🎯 СКОРОСТНОЕ СКАНИРОВАНИЕ И ГЕНЕРАЦИЯ JSON ДЛЯ ЛЕКСА
-        if subcommand in ["raid", "scan_raid"]:
-            target_date_str = datetime.now().strftime("%Y-%m-%d")
-            
-            if value and re.match(r"^\d{4}-\d{2}-\d{2}$", value.strip()):
-                target_date_str = value.strip()
+        # --- ЕДИНАЯ КОМАНДА УПРАВЛЕНИЯ ЩИТОМ (SUDO SHIELD) ---
+        if subcommand == "shield":
+            sub2 = parts[2].lower() if len(parts) > 2 else None
+            val2 = parts[3].strip() if len(parts) > 3 else None
 
-            status_msg = await event.reply(f"⏳ **Юзербот сканирует Журнал недавних действий сервера за {target_date_str}...**")
+            # 1. Если просто 'sudo shield' — выводим компактное меню и статус
+            if not sub2:
+                shield_on = db_get_int('shield_enabled', 1) == 1
+                captcha_on = db_get_int('captcha_enabled', 1) == 1
+                raid_thresh = max(2, db_get_int('raid_threshold_count', 5))
 
-            try:
-                chat = await event.get_chat()
-                collected_bots = []
+                shield_status = "ВКЛЮЧЁН ✅" if shield_on else "ВЫКЛЮЧЕН ❌"
+                captcha_status = "ВКЛЮЧЕНА ✅" if captcha_on else "ВЫКЛЮЧЕНА ❌"
 
-                async for log_event in client.iter_admin_log(chat, join=True):
-                    user = log_event.user
-                    if not user or user.bot:
-                        continue
-
-                    event_date_str = log_event.date.strftime("%Y-%m-%d")
-                    if event_date_str == target_date_str:
-                        user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Участник"
-                        time_str = log_event.date.strftime("%H:%M:%S")
-                        collected_bots.append({
-                            "id": user.id,
-                            "username": user.username or "",
-                            "name": user_name,
-                            "time": time_str
-                        })
-
-                if not collected_bots:
-                    return await status_msg.edit(f"🔍 **В Журнале недавних действий за дату `{target_date_str}` зашедших не найдено.**")
-
-                # Сортируем от первого зашедшего к последнему
-                collected_bots.reverse()
-                total_count = len(collected_bots)
-                first_bot = collected_bots[0]
-                last_bot = collected_bots[-1]
-
-                # Упаковываем структуру в JSON-файл в памяти
-                payload_data = {
-                    "target_date": target_date_str,
-                    "total_count": total_count,
-                    "first_bot": first_bot,
-                    "last_bot": last_bot,
-                    "bots": collected_bots
-                }
-
-                json_bytes = json.dumps(payload_data, ensure_ascii=False, indent=2).encode("utf-8")
-                json_file = io.BytesIO(json_bytes)
-                json_file.name = f"raid_{target_date_str}.json"
-
-                report_text = (
-                    f"🎯 **СНАЙПЕР СОБРАЛ РЕЙД-БОТНЕТ!**\n\n"
-                    f"📊 **Всего найдено:** `{total_count}` ботов\n"
-                    f"📅 **Дата:** `{target_date_str}`\n\n"
-                    f"🥇 **Первый:** {first_bot['name']} (@{first_bot['username'] or 'нет'}) | `{first_bot['id']}` в {first_bot['time']}\n"
-                    f"🏁 **Последний:** {last_bot['name']} (@{last_bot['username'] or 'нет'}) | `{last_bot['id']}` в {last_bot['time']}\n\n"
-                    f"📄 **Сформирован файл `raid_{target_date_str}.json`!**\n"
-                    f"Сделайте **реплай (ответить)** на этот файл командой `/raid` для передачи Лексу."
+                shield_help = (
+                    "🛡️ **УПРАВЛЕНИЕ СИСТЕМОЙ ЩИТА (SUDO SHIELD)**\n\n"
+                    "⚙️ **Текущий статус:**\n"
+                    f"• Главный Щит: **{shield_status}**\n"
+                    f"• Математическая Капча: **{captcha_status}**\n"
+                    f"• Порог авто-рейда: `{raid_thresh}` входов / 10 сек\n\n"
+                    "📊 **Отчёты и Логи:**\n"
+                    "• `sudo shield report` — Статистика капчи и авто-рейдов\n"
+                    "• `sudo shield logs` — Последние 50 событий защиты\n\n"
+                    "🔧 **Команды Настройки:**\n"
+                    "• `sudo shield on` | `sudo shield off` — Вкл/выкл весь Щит\n"
+                    "• `sudo shield captcha on` | `sudo shield captcha off` — Вкл/выкл капчу\n"
+                    "• `sudo shield rate {число}` — Порог авто-рейда (от 2 и выше)"
                 )
+                return await safe_reply(event, shield_help)
 
-                await status_msg.delete()
-                await client.send_file(event.chat_id, file=json_file, caption=report_text)
+            # 2. Вкл/выкл главный Щит
+            elif sub2 in ["on", "1", "true", "вкл"]:
+                db_set('shield_enabled', '1')
+                return await event.reply("✅ Главный Щит **ВКЛЮЧЁН**.")
 
-            except Exception as e:
-                await status_msg.edit(f"❌ **Ошибка сканирования юзерботом:**\n`{e}`")
+            elif sub2 in ["off", "0", "false", "выкл"]:
+                db_set('shield_enabled', '0')
+                return await event.reply("❌ Главный Щит полностью **ВЫКЛЮЧЁН**.")
+
+            # 3. Вкл/выкл только Капчу (Анти-Рейд продолжает работать!)
+            elif sub2 == "captcha" and val2:
+                v = val2.lower()
+                if v in ["on", "1", "true", "вкл"]:
+                    db_set('captcha_enabled', '1')
+                    return await event.reply("✅ Математическая капча **ВКЛЮЧЕНА**.")
+                elif v in ["off", "0", "false", "выкл"]:
+                    db_set('captcha_enabled', '0')
+                    return await event.reply("❌ Математическая капча **ВЫКЛЮЧЕНА** (Анти-рейд защита остаётся активной!).")
+
+            # 4. Настройка порога скорости авто-рейда (от 2 выходов)
+            elif sub2 in ["rate", "threshold"] and val2:
+                if val2.isdigit() and int(val2) >= 2:
+                    db_set('raid_threshold_count', val2)
+                    return await event.reply(f"⏱ Порог срабатывания авто-рейда изменён на **{val2}** входов за 10 сек.")
+                else:
+                    return await event.reply("❌ Порог должен быть числом **от 2 и выше**!")
+
+            # 5. Отчёт статистики
+            elif sub2 in ["report", "stat", "stats"]:
+                conn = sqlite3.connect(DB_NAME)
+                cur = conn.cursor()
+                
+                sent_cnt = cur.execute("SELECT COUNT(*) FROM raid_logs WHERE event_type = 'CAPTCHA_SENT'").fetchone()[0]
+                pass_cnt = cur.execute("SELECT COUNT(*) FROM raid_logs WHERE event_type = 'CAPTCHA_PASSED'").fetchone()[0]
+                text_fail_cnt = cur.execute("SELECT COUNT(*) FROM raid_logs WHERE event_type = 'CAPTCHA_TEXT_FAIL'").fetchone()[0]
+                num_fail_cnt = cur.execute("SELECT COUNT(*) FROM raid_logs WHERE event_type = 'CAPTCHA_FAIL_NUMBERS'").fetchone()[0]
+                timeout_cnt = cur.execute("SELECT COUNT(*) FROM raid_logs WHERE event_type = 'CAPTCHA_TIMEOUT'").fetchone()[0]
+                ban_cnt = cur.execute("SELECT COUNT(*) FROM raid_logs WHERE event_type = 'RAID_AUTO_BAN'").fetchone()[0]
+                raid_cnt = cur.execute("SELECT COUNT(*) FROM raid_logs WHERE event_type = 'RAID_TRIGGERED'").fetchone()[0]
+                conn.close()
+
+                is_raid_active = RAID_MODE_ACTIVE.get(event.chat_id, False)
+                status_str = "🚨 **РЕЖИМ РЕЙДА АКТИВЕН (АВТО-БАН)!**" if is_raid_active else "🟢 **Штатный режим**"
+
+                report = (
+                    "📊 **ОТЧЁТ СИСТЕМЫ ЩИТА И КАПЧИ**\n\n"
+                    f"**Статус чата:** {status_str}\n\n"
+                    f"🧩 **Математические капчи:**\n"
+                    f"• Выдано при входе: `{sent_cnt}`\n"
+                    f"• Успешно решено: `{pass_cnt}`\n"
+                    f"• Кикнуто за ВВОД ТЕКСТА: `{text_fail_cnt}`\n"
+                    f"• Мьютов за ошибки чисел: `{num_fail_cnt}`\n"
+                    f"• Мьютов за ТАЙМАУТ (3 мин): `{timeout_cnt}`\n\n"
+                    f"⚡ **Анти-Рейд Защита:**\n"
+                    f"• Срабатываний рейда: `{raid_cnt}`\n"
+                    f"• Авто-забанено рейдеров: `{ban_cnt}`"
+                )
+                return await safe_reply(event, report, filename="shield_report.txt")
+
+            # 6. Логи событий
+            elif sub2 in ["logs", "log"]:
+                conn = sqlite3.connect(DB_NAME)
+                cur = conn.cursor()
+                rows = cur.execute("""
+                    SELECT timestamp, event_type, user_id, full_name, details 
+                    FROM raid_logs 
+                    ORDER BY id DESC LIMIT 50
+                """).fetchall()
+                conn.close()
+
+                if not rows:
+                    return await event.reply("📄 **Логи системы Щита пусты.**")
+
+                lines = ["📜 **ПОСЛЕДНИЕ 50 СОБЫТИЙ СИСТЕМЫ ЩИТА:**\n"]
+                for r in rows:
+                    ts, ev, uid, name, det = r
+                    lines.append(f"• [{ts}] **{ev}** | {name} (`{uid}`) — {det}")
+
+                full_log_text = "\n".join(lines)
+                return await safe_reply(event, full_log_text, filename="shield_events_log.txt")
+
+            else:
+                return await event.reply("❌ Неизвестная подкоманда. Напишите `sudo shield` для справки.")
 
         elif subcommand in ["log", "logs"]:
             logs = memory_log_handler.get_logs(limit=20)
             if not logs:
-                return await event.reply("📄 **Логи пока пусты.**")
+                return await event.reply("📄 **Консольные логи пока пусты.**")
 
             log_text = "\n".join(logs)
-            if len(log_text) > 3900:
-                log_text = log_text[-3900:]
-
             reply_text = f"📜 **Последние логи юзербота:**\n\n```text\n{log_text}\n```"
-            await event.reply(reply_text)
+            await safe_reply(event, reply_text, filename="userbot_console_log.txt")
 
         elif subcommand == "add_regex" and value:
             if db_add_regex(value): await event.reply(f"✅ Регекс `{value}` добавлен.")
@@ -402,7 +716,7 @@ async def owner_commands_handler(event):
         elif subcommand == "list_regex":
             items = db_list_regex()
             text = "🧹 **Список регексов (люди):**\n" + ("\n".join([f"• `{item}`" for item in items]) if items else "Пусто.")
-            await event.reply(text)
+            await safe_reply(event, text, filename="regex_list.txt")
 
         elif subcommand == "add_banword" and value:
             subparts = value.split()
@@ -424,7 +738,7 @@ async def owner_commands_handler(event):
                 "\n".join([f"• `{word}` | задержка: **{delay}** сек" for word, delay in items]) 
                 if items else "Пусто."
             )
-            await event.reply(text)
+            await safe_reply(event, text, filename="banwords_list.txt")
 
         elif subcommand in ["add_exc", "add_exception"] and value:
             if db_add_exception(value): await event.reply(f"🛡️ Слово-исключение `{value}` добавлено.")
@@ -439,7 +753,7 @@ async def owner_commands_handler(event):
             text = "🛡️ **Список слов-исключений (защита от удаления):**\n" + (
                 "\n".join([f"• `{item}`" for item in items]) if items else "Пусто."
             )
-            await event.reply(text)
+            await safe_reply(event, text, filename="exceptions_list.txt")
             
         elif subcommand == "set_delay_user" and value:
             if value.isdigit():
