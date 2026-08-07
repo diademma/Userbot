@@ -1,7 +1,9 @@
-# CODEVER: v2.6 | Sniper Userbot for LEX (Raid Collector + In-Telegram 'sudo log')
+# CODEVER: v2.7 | Sniper Userbot for LEX (Full File with JSON Raid Generator)
 import os
 import re
 import sys
+import io
+import json
 import asyncio
 import sqlite3
 import logging
@@ -282,9 +284,7 @@ async def message_handler(event):
                 asyncio.create_task(delete_after(event, delay, reason))
                 return
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ОБРАБОТЧИК КОМАНД SUDO (ВКЛЮЧАЯ СБОРЩИК РЕЙД-БОТОВ)
-# ─────────────────────────────────────────────────────────────────────────────
+# --- ОБРАБОТЧИК КОМАНД SUDO ---
 
 @client.on(events.NewMessage(from_users=OWNER_ID, pattern=r"^sudo.*"))
 async def owner_commands_handler(event):
@@ -296,9 +296,9 @@ async def owner_commands_handler(event):
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v2.6 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v2.7 активен!**\n\n"
             "**⚡ Очистка Ботнета (Anti-Raid):**\n"
-            "• `sudo raid` — Собрать ботов за СЕГОДНЯ и передать Лексу\n"
+            "• `sudo raid` — Собрать ботов за СЕГОДНЯ и отправить .json файл\n"
             "• `sudo raid YYYY-MM-DD` — Собрать ботов за конкретную дату\n\n"
             "**Просмотр логов:**\n"
             "• `sudo log` — Показать последние логи юзербота\n\n"
@@ -312,7 +312,7 @@ async def owner_commands_handler(event):
         return await event.reply(help_text)
 
     try:
-        # 🎯 СКОРОСТНОЙ СКАНИРОВАНИЕ И ПЕРЕДАЧА ЛЕКСУ (SUDO RAID)
+        # 🎯 СКОРОСТНОЕ СКАНИРОВАНИЕ И ГЕНЕРАЦИЯ JSON ДЛЯ ЛЕКСА
         if subcommand in ["raid", "scan_raid"]:
             target_date_str = datetime.now().strftime("%Y-%m-%d")
             
@@ -325,7 +325,6 @@ async def owner_commands_handler(event):
                 chat = await event.get_chat()
                 collected_bots = []
 
-                # Сканируем Журнал недавних действий чата напрямую у Telegram
                 async for log_event in client.iter_admin_log(chat, join=True):
                     user = log_event.user
                     if not user or user.bot:
@@ -337,7 +336,7 @@ async def owner_commands_handler(event):
                         time_str = log_event.date.strftime("%H:%M:%S")
                         collected_bots.append({
                             "id": user.id,
-                            "username": user.username,
+                            "username": user.username or "",
                             "name": user_name,
                             "time": time_str
                         })
@@ -351,29 +350,31 @@ async def owner_commands_handler(event):
                 first_bot = collected_bots[0]
                 last_bot = collected_bots[-1]
 
-                # Формируем список для отправки Лексу
-                bot_list_lines = []
-                for b in collected_bots:
-                    if b['username']:
-                        bot_list_lines.append(f"@{b['username']}")
-                    else:
-                        bot_list_lines.append(str(b['id']))
+                # Упаковываем структуру в JSON-файл в памяти
+                payload_data = {
+                    "target_date": target_date_str,
+                    "total_count": total_count,
+                    "first_bot": first_bot,
+                    "last_bot": last_bot,
+                    "bots": collected_bots
+                }
 
-                bot_payload_text = "\n".join(bot_list_lines)
+                json_bytes = json.dumps(payload_data, ensure_ascii=False, indent=2).encode("utf-8")
+                json_file = io.BytesIO(json_bytes)
+                json_file.name = f"raid_{target_date_str}.json"
 
                 report_text = (
                     f"🎯 **СНАЙПЕР СОБРАЛ РЕЙД-БОТНЕТ!**\n\n"
                     f"📊 **Всего найдено:** `{total_count}` ботов\n"
                     f"📅 **Дата:** `{target_date_str}`\n\n"
-                    f"🥇 **Первый зашедший:** {first_bot['name']} (@{first_bot['username'] or 'нет'}) | `{first_bot['id']}` в {first_bot['time']}\n"
-                    f"🏁 **Последний зашедший:** {last_bot['name']} (@{last_bot['username'] or 'нет'}) | `{last_bot['id']}` в {last_bot['time']}\n\n"
-                    f"🚀 **Передаю весь список Лексу для зачистки...**"
+                    f"🥇 **Первый:** {first_bot['name']} (@{first_bot['username'] or 'нет'}) | `{first_bot['id']}` в {first_bot['time']}\n"
+                    f"🏁 **Последний:** {last_bot['name']} (@{last_bot['username'] or 'нет'}) | `{last_bot['id']}` в {last_bot['time']}\n\n"
+                    f"📄 **Сформирован файл `raid_{target_date_str}.json`!**\n"
+                    f"Сделайте **реплай (ответить)** на этот файл командой `/raid` для передачи Лексу."
                 )
-                await status_msg.edit(report_text)
 
-                # Передаём сформированную команду импорта прямо в чат для Лекса
-                import_cmd = f"/raid_import\n{bot_payload_text}"
-                await client.send_message(event.chat_id, import_cmd)
+                await status_msg.delete()
+                await client.send_file(event.chat_id, file=json_file, caption=report_text)
 
             except Exception as e:
                 await status_msg.edit(f"❌ **Ошибка сканирования юзерботом:**\n`{e}`")
