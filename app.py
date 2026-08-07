@@ -1,4 +1,4 @@
-# CODEVER: v2.5 | Sniper Userbot for LEX (In-Telegram 'sudo log', Live Buffer & Exception Whitelist)
+# CODEVER: v2.6 | Sniper Userbot for LEX (Raid Collector + In-Telegram 'sudo log')
 import os
 import re
 import sys
@@ -6,6 +6,7 @@ import asyncio
 import sqlite3
 import logging
 import subprocess
+from datetime import datetime
 from collections import deque
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -70,7 +71,6 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS bot_exceptions (id INTEGER PRIMARY KEY, word TEXT UNIQUE)")
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     
-    # Автоматическая чистка пустых и опасных записей
     cur.execute("DELETE FROM bot_banwords WHERE word IS NULL OR TRIM(word) = '' OR word LIKE '%(д|н|м%'")
     cur.execute("DELETE FROM regex_patterns WHERE pattern IS NULL OR TRIM(pattern) = ''")
     cur.execute("DELETE FROM bot_exceptions WHERE word IS NULL OR TRIM(word) = ''")
@@ -85,7 +85,6 @@ def init_db():
     conn.close()
     logging.info("База данных инициализирована и защищена.")
 
-# --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 def db_add_regex(pattern):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -195,8 +194,6 @@ client = TelegramClient(
     api_hash=API_HASH
 )
 
-# --- ГЛАВНАЯ ЛОГИКА ЮЗЕРБОТА ---
-
 async def delete_after(event, delay, reason=""):
     try:
         await asyncio.sleep(delay)
@@ -218,16 +215,13 @@ async def message_handler(event):
     is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
     sender_username = getattr(sender, 'username', '') or 'unknown'
 
-    # Игнорируем Лекса и sudo-команды
     if sender_username.lower() == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo"):
         return
 
-    # Логируем полученное сообщение от бота
     if is_bot:
         short_text = text[:35].replace('\n', ' ')
         logging.info(f"📩 Бот @{sender_username} прислал: '{short_text}...'")
 
-    # --- СЦЕНАРИЙ 1: Сообщение от ЧЕЛОВЕКА ---
     if not is_bot:
         patterns = db_list_regex()
         for pattern in patterns:
@@ -243,10 +237,7 @@ async def message_handler(event):
                     return
             except re.error as e:
                 logging.error(f"Ошибка в регексе '{pattern_clean}': {e}")
-
-    # --- СЦЕНАРИЙ 2: Сообщение от БОТА ---
     else:
-        # === ШАГ 1: ВЫСОКИЙ ПРИОРИТЕТ — ПРОВЕРКА СЛОВ-ИСКЛЮЧЕНИЙ ===
         exceptions = db_list_exceptions()
         for exc_word in exceptions:
             exc_clean = exc_word.strip()
@@ -254,10 +245,8 @@ async def message_handler(event):
                 continue
 
             exc_matched = False
-            # 1.1 Точное совпадение подстроки
             if exc_clean.lower() in text.lower():
                 exc_matched = True
-            # 1.2 Проверка как Regex (если содержит спецсимволы)
             elif any(c in exc_clean for c in r".*+?^$[]{}()|\\"):
                 try:
                     m = re.search(exc_clean, text, re.IGNORECASE)
@@ -268,9 +257,8 @@ async def message_handler(event):
 
             if exc_matched:
                 logging.info(f"🛡️ [БОТ @{sender_username}] Найдено исключение: '{exc_clean}'. Сообщение НЕ будет удалено!")
-                return  # Прерываем выполнение, т.к. слово в белом списке
+                return
 
-        # === ШАГ 2: ПРОВЕРКА БАН-СЛОВ (если исключения не сработали) ===
         banwords = db_list_banwords()
         for word, delay in banwords:
             word_clean = word.strip()
@@ -278,11 +266,8 @@ async def message_handler(event):
                 continue
 
             matched = False
-
-            # 1. Проверяем точное вхождение подстроки
             if word_clean.lower() in text.lower():
                 matched = True
-            # 2. Проверяем как регекс (с защитой от совпадения с 1 буквой)
             elif any(c in word_clean for c in r".*+?^$[]{}()|\\"):
                 try:
                     m = re.search(word_clean, text, re.IGNORECASE)
@@ -297,6 +282,10 @@ async def message_handler(event):
                 asyncio.create_task(delete_after(event, delay, reason))
                 return
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ОБРАБОТЧИК КОМАНД SUDO (ВКЛЮЧАЯ СБОРЩИК РЕЙД-БОТОВ)
+# ─────────────────────────────────────────────────────────────────────────────
+
 @client.on(events.NewMessage(from_users=OWNER_ID, pattern=r"^sudo.*"))
 async def owner_commands_handler(event):
     parts = event.raw_text.split()
@@ -304,33 +293,92 @@ async def owner_commands_handler(event):
     subcommand = parts[1] if len(parts) > 1 else None
     value = " ".join(parts[2:]) if len(parts) > 2 else None
 
-    # --- Главная команда sudo ---
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v2.5 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v2.6 активен!**\n\n"
+            "**⚡ Очистка Ботнета (Anti-Raid):**\n"
+            "• `sudo raid` — Собрать ботов за СЕГОДНЯ и передать Лексу\n"
+            "• `sudo raid YYYY-MM-DD` — Собрать ботов за конкретную дату\n\n"
             "**Просмотр логов:**\n"
             "• `sudo log` — Показать последние логи юзербота\n\n"
             "**Триггеры для людей (Regex):**\n"
-            "• `sudo add_regex {выражение}`\n"
-            "• `sudo del_regex {выражение}`\n"
-            "• `sudo list_regex`\n\n"
+            "• `sudo add_regex {выражение}` | `sudo del_regex` | `sudo list_regex`\n\n"
             "**Бан-слова для ботов (Banwords):**\n"
-            "• `sudo add_banword {слово} {секунды}`\n"
-            "• `sudo del_banword {слово}`\n"
-            "• `sudo list_banwords`\n\n"
+            "• `sudo add_banword {слово} {сек}` | `sudo del_banword` | `sudo list_banwords`\n\n"
             "**🛡️ Исключения для ботов (Whitelist):**\n"
-            "• `sudo add_exc {слово}`\n"
-            "• `sudo del_exc {слово}`\n"
-            "• `sudo list_exc`\n\n"
-            "**Задержки:**\n"
-            f"• `sudo set_delay_user {delay_user}` (для людей)"
+            "• `sudo add_exc {слово}` | `sudo del_exc` | `sudo list_exc`"
         )
         return await event.reply(help_text)
 
     try:
-        # --- КОМАНДА ДЛЯ ПРОСМОТРА ЛОГОВ ПРЯМО В ТЕЛЕГРАМ ---
-        if subcommand in ["log", "logs"]:
+        # 🎯 СКОРОСТНОЙ СКАНИРОВАНИЕ И ПЕРЕДАЧА ЛЕКСУ (SUDO RAID)
+        if subcommand in ["raid", "scan_raid"]:
+            target_date_str = datetime.now().strftime("%Y-%m-%d")
+            
+            if value and re.match(r"^\d{4}-\d{2}-\d{2}$", value.strip()):
+                target_date_str = value.strip()
+
+            status_msg = await event.reply(f"⏳ **Юзербот сканирует Журнал недавних действий сервера за {target_date_str}...**")
+
+            try:
+                chat = await event.get_chat()
+                collected_bots = []
+
+                # Сканируем Журнал недавних действий чата напрямую у Telegram
+                async for log_event in client.iter_admin_log(chat, join=True):
+                    user = log_event.user
+                    if not user or user.bot:
+                        continue
+
+                    event_date_str = log_event.date.strftime("%Y-%m-%d")
+                    if event_date_str == target_date_str:
+                        user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Участник"
+                        time_str = log_event.date.strftime("%H:%M:%S")
+                        collected_bots.append({
+                            "id": user.id,
+                            "username": user.username,
+                            "name": user_name,
+                            "time": time_str
+                        })
+
+                if not collected_bots:
+                    return await status_msg.edit(f"🔍 **В Журнале недавних действий за дату `{target_date_str}` зашедших не найдено.**")
+
+                # Сортируем от первого зашедшего к последнему
+                collected_bots.reverse()
+                total_count = len(collected_bots)
+                first_bot = collected_bots[0]
+                last_bot = collected_bots[-1]
+
+                # Формируем список для отправки Лексу
+                bot_list_lines = []
+                for b in collected_bots:
+                    if b['username']:
+                        bot_list_lines.append(f"@{b['username']}")
+                    else:
+                        bot_list_lines.append(str(b['id']))
+
+                bot_payload_text = "\n".join(bot_list_lines)
+
+                report_text = (
+                    f"🎯 **СНАЙПЕР СОБРАЛ РЕЙД-БОТНЕТ!**\n\n"
+                    f"📊 **Всего найдено:** `{total_count}` ботов\n"
+                    f"📅 **Дата:** `{target_date_str}`\n\n"
+                    f"🥇 **Первый зашедший:** {first_bot['name']} (@{first_bot['username'] or 'нет'}) | `{first_bot['id']}` в {first_bot['time']}\n"
+                    f"🏁 **Последний зашедший:** {last_bot['name']} (@{last_bot['username'] or 'нет'}) | `{last_bot['id']}` в {last_bot['time']}\n\n"
+                    f"🚀 **Передаю весь список Лексу для зачистки...**"
+                )
+                await status_msg.edit(report_text)
+
+                # Передаём сформированную команду импорта прямо в чат для Лекса
+                import_cmd = f"/raid_import\n{bot_payload_text}"
+                await client.send_message(event.chat_id, import_cmd)
+
+            except Exception as e:
+                await status_msg.edit(f"❌ **Ошибка сканирования юзерботом:**\n`{e}`")
+
+        elif subcommand in ["log", "logs"]:
             logs = memory_log_handler.get_logs(limit=20)
             if not logs:
                 return await event.reply("📄 **Логи пока пусты.**")
@@ -377,7 +425,6 @@ async def owner_commands_handler(event):
             )
             await event.reply(text)
 
-        # --- ОБРАБОТКА СЛОВ-ИСКЛЮЧЕНИЙ (БЕЛЫЙ СПИСОК) ---
         elif subcommand in ["add_exc", "add_exception"] and value:
             if db_add_exception(value): await event.reply(f"🛡️ Слово-исключение `{value}` добавлено.")
             else: await event.reply(f"⚠️ Слово-исключение `{value}` уже есть в базе.")
