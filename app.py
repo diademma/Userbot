@@ -1,4 +1,4 @@
-# CODEVER: v3.7 | Sniper Userbot for LEX (Verbose Join Diagnostics & Entity Resolver)
+# CODEVER: v3.8 | Sniper Userbot for LEX (Bulletproof Service Message Interceptor)
 import os
 import re
 import sys
@@ -20,8 +20,7 @@ from telethon.tl.types import (
     MessageActionChatJoinedByLink,
     MessageActionChatAddUser,
     MessageActionChatJoinedByRequest,
-    UpdateNewChannelMessage,
-    UpdateNewMessage,
+    MessageActionChatJoined,
     UpdateChannelParticipant,
     ChannelParticipantSelf
 )
@@ -44,7 +43,7 @@ class MemoryLogHandler(logging.Handler):
         logs = list(self.buffer)
         return logs[-limit:] if logs else []
 
-# Настройка логирования в консоль и в оперативную память
+# Настройка логирования
 memory_log_handler = MemoryLogHandler(capacity=50)
 memory_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
@@ -63,7 +62,7 @@ DB_NAME = "userbot_memory.db"
 # --- ГЛОБАЛЬНЫЕ СТРУКТУРЫ ДЛЯ АНТИРЕЙДА И КАПЧИ ---
 PENDING_CAPTCHAS = {}  # {(chat_id, user_id): {"answer": int, "attempts_left": int, "captcha_msg_id": int, "warn_msg_ids": list, "join_time": float, "task": Task}}
 RECENT_JOINS = deque(maxlen=200)  # [(timestamp, chat_id, user_id)]
-JOIN_DEDUP = deque(maxlen=300)    # [(chat_id, user_id)] - защита от повторных срабатываний
+JOIN_DEDUP = deque(maxlen=300)    # [(chat_id, user_id)] - защита от дублей
 RAID_MODE_ACTIVE = {}  # {chat_id: bool}
 RAID_RESET_TASKS = {}  # {chat_id: Task}
 
@@ -73,10 +72,8 @@ def save_db_to_git():
         status = subprocess.run(["git", "status", "--porcelain", DB_NAME], capture_output=True, text=True)
         if not status.stdout.strip():
             return
-
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
-        
         subprocess.run(["git", "add", DB_NAME], check=True)
         subprocess.run(["git", "commit", "-m", "chore: update userbot memory [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
@@ -92,8 +89,6 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS bot_banwords (id INTEGER PRIMARY KEY, word TEXT UNIQUE, delay INTEGER DEFAULT 45)")
     cur.execute("CREATE TABLE IF NOT EXISTS bot_exceptions (id INTEGER PRIMARY KEY, word TEXT UNIQUE)")
     cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-    
-    # Таблица логов анти-рейд активности
     cur.execute("""
         CREATE TABLE IF NOT EXISTS raid_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,17 +101,13 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
     cur.execute("DELETE FROM bot_banwords WHERE word IS NULL OR TRIM(word) = '' OR word LIKE '%(д|н|м%'")
     cur.execute("DELETE FROM regex_patterns WHERE pattern IS NULL OR TRIM(pattern) = ''")
     cur.execute("DELETE FROM bot_exceptions WHERE word IS NULL OR TRIM(word) = ''")
     
-    try:
-        cur.execute("ALTER TABLE bot_banwords ADD COLUMN delay INTEGER DEFAULT 45")
-    except sqlite3.OperationalError:
-        pass
+    try: cur.execute("ALTER TABLE bot_banwords ADD COLUMN delay INTEGER DEFAULT 45")
+    except sqlite3.OperationalError: pass
         
-    # Дефолтные настройки
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('delay_user_command', '5')")
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shield_enabled', '1')")
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('captcha_enabled', '1')")
@@ -124,7 +115,6 @@ def init_db():
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('raid_threshold_seconds', '10')")
     conn.commit()
     conn.close()
-    logging.info("База данных инициализирована и защищена.")
 
 def log_raid_event(event_type, user_id, username, full_name, chat_id, details=""):
     try:
@@ -135,10 +125,9 @@ def log_raid_event(event_type, user_id, username, full_name, chat_id, details=""
         """, (event_type, user_id, username, full_name, chat_id, details))
         conn.commit()
         conn.close()
-    except Exception as e:
-        logging.error(f"Ошибка логирования анти-рейда в БД: {e}")
+    except Exception:
+        pass
 
-# --- ФУНКЦИИ БД ---
 def db_add_regex(pattern):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -147,8 +136,7 @@ def db_add_regex(pattern):
         conn.close()
         save_db_to_git()
         return True
-    except sqlite3.IntegrityError:
-        return False
+    except sqlite3.IntegrityError: return False
 
 def db_add_banword(word, delay=45):
     try:
@@ -158,9 +146,7 @@ def db_add_banword(word, delay=45):
         conn.close()
         save_db_to_git()
         return True
-    except Exception as e:
-        logging.error(f"Ошибка БД при сохранении бан-слова: {e}")
-        return False
+    except Exception: return False
 
 def db_add_exception(word):
     try:
@@ -170,8 +156,7 @@ def db_add_exception(word):
         conn.close()
         save_db_to_git()
         return True
-    except sqlite3.IntegrityError:
-        return False
+    except sqlite3.IntegrityError: return False
 
 def db_del_regex(pattern):
     conn = sqlite3.connect(DB_NAME)
@@ -234,21 +219,21 @@ def db_get_int(key, default):
     conn.close()
     return int(row[0]) if (row and str(row[0]).isdigit()) else default
 
+def db_get_str(key, default):
+    conn = sqlite3.connect(DB_NAME)
+    row = conn.cursor().execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return str(row[0]) if row else default
+
 # --- КЛИЕНТ TELETHON ---
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
 
-if API_ID:
-    API_ID = int(API_ID)
+if API_ID: API_ID = int(API_ID)
 
-client = TelegramClient(
-    session=StringSession(SESSION_STRING),
-    api_id=API_ID,
-    api_hash=API_HASH
-)
+client = TelegramClient(session=StringSession(SESSION_STRING), api_id=API_ID, api_hash=API_HASH)
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ БЕЗОПАСНОЙ ОТПРАВКИ ---
 async def safe_reply(event, text_content, filename="report.txt"):
     if len(text_content) > 3500:
         file_data = io.BytesIO(text_content.encode('utf-8'))
@@ -260,51 +245,42 @@ async def safe_reply(event, text_content, filename="report.txt"):
 
 # --- ИСПОЛНИТЕЛИ НАКАЗАНИЙ ---
 async def penalty_kick(chat_id, user_id):
-    try:
-        await client.kick_participant(chat_id, user_id)
-    except Exception as e:
-        logging.error(f"Не удалось кикнуть пользователя {user_id}: {e}")
+    try: await client.kick_participant(chat_id, user_id)
+    except Exception as e: logging.error(f"Не удалось кикнуть пользователя {user_id}: {e}")
 
 async def penalty_mute(chat_id, user_id):
     try:
-        mute_rights = ChatBannedRights(
-            until_date=None,
-            send_messages=True,
-            send_media=True,
-            send_stickers=True,
-            send_gifs=True,
-            send_games=True,
-            send_inline=True,
-            embed_link_previews=True
-        )
+        mute_rights = ChatBannedRights(until_date=None, send_messages=True, send_media=True, send_stickers=True, send_gifs=True, send_games=True, send_inline=True, embed_link_previews=True)
         await client(EditBannedRequest(channel=chat_id, participant=user_id, banned_rights=mute_rights))
-    except Exception as e:
-        logging.error(f"Не удалось замьютить пользователя {user_id}: {e}")
+    except Exception as e: logging.error(f"Не удалось замьютить пользователя {user_id}: {e}")
 
 async def penalty_ban(chat_id, user_id):
     try:
         ban_rights = ChatBannedRights(until_date=None, view_messages=True)
         await client(EditBannedRequest(channel=chat_id, participant=user_id, banned_rights=ban_rights))
-    except Exception as e:
-        logging.error(f"Не удалось забанить пользователя {user_id}: {e}")
+    except Exception as e: logging.error(f"Не удалось забанить пользователя {user_id}: {e}")
 
-# --- ТАЙМАУТ КАПЧИ (3 МИНУТЫ) ---
+# --- ТАЙМАУТ КАПЧИ ---
 async def captcha_timeout_worker(chat_id, user_id, user_name, captcha_msg_id):
-    await asyncio.sleep(180)  # 3 минуты
+    timeout_sec = db_get_int('captcha_timeout_sec', 180)
+    await asyncio.sleep(timeout_sec)
     
     key = (chat_id, user_id)
     if key in PENDING_CAPTCHAS:
         captcha_data = PENDING_CAPTCHAS.pop(key)
+        action = db_get_str('captcha_action_fail', 'mute')
         
-        await penalty_mute(chat_id, user_id)  # За таймаут — МЬЮТ
-        log_raid_event("CAPTCHA_TIMEOUT", user_id, "", user_name, chat_id, "Наказание: МЬЮТ (не ответил за 3 минуты)")
-        logging.info(f"🛡️ [Щит] Пользователь {user_id} ({user_name}) замьючен за таймаут капчи.")
+        if action == "kick": await penalty_kick(chat_id, user_id)
+        elif action == "ban": await penalty_ban(chat_id, user_id)
+        else: await penalty_mute(chat_id, user_id)
+
+        log_raid_event("CAPTCHA_TIMEOUT", user_id, "", user_name, chat_id, f"Наказание: {action.upper()} (не ответил за {timeout_sec}с)")
+        logging.info(f"🛡️ [Щит] Пользователь {user_id} ({user_name}) получил {action.upper()} за таймаут.")
         
         try:
             msgs_to_del = [captcha_msg_id] + captcha_data.get("warn_msg_ids", [])
             await client.delete_messages(chat_id, msgs_to_del)
-        except Exception:
-            pass
+        except Exception: pass
 
 # --- ТАЙМЕР АВТО-ОТКЛЮЧЕНИЯ РЕЖИМА РЕЙДА ---
 async def raid_reset_worker(chat_id):
@@ -313,28 +289,24 @@ async def raid_reset_worker(chat_id):
     log_raid_event("RAID_STOPPED", 0, "", "", chat_id, "Анти-рейд режим авто-выключен (тишина 2 мин)")
     logging.info(f"🛡️ [Щит] Режим рейда для чата {chat_id} автоматически отключён.")
 
-# --- ЕДИНАЯ ТОЧКА ОБРАБОТКИ ВХОДА УЧАСТНИКОВ ---
+# --- ЕДИНАЯ ТОЧКА ОБРАБОТКИ ВХОДА ---
 async def trigger_join_pipeline(chat_id, user, is_test=False):
-    if not user:
-        return
+    if not user: return
+    
+    # 0. ПРОВЕРКА: ВКЛЮЧЁН ЛИ ГЛАВНЫЙ ЩИТ
+    if db_get_int('shield_enabled', 1) == 0 and not is_test: return
 
     logging.info(f"📥 [ВХОД ОБНАРУЖЕН] user_id={user.id} ({user.first_name}) in chat={chat_id}")
 
     if not is_test:
-        if user.is_self:
-            logging.info(f"ℹ️ Пропуск своего аккаунта юзербота: {user.id}")
-            return
-        if getattr(user, 'bot', False):
-            logging.info(f"ℹ️ Пропуск бота: {user.id}")
-            return
+        if user.is_self: return
+        if getattr(user, 'bot', False): return
         if user.id == OWNER_ID:
-            logging.info(f"👑 [ПРОПУСК] Владелец зашел в чат (user_id={user.id}). Капча Владельцу не выдается!")
+            logging.info(f"👑 Пропуск Владельца (user_id={user.id}).")
             return
 
-        # Защита от дублирующих срабатываний (в пределах 10 сек)
         dedup_key = (chat_id, user.id)
         if dedup_key in JOIN_DEDUP:
-            logging.info(f"ℹ️ Повторное событие за 10с для user_id={user.id}, пропущено.")
             return
         JOIN_DEDUP.append(dedup_key)
 
@@ -342,47 +314,46 @@ async def trigger_join_pipeline(chat_id, user, is_test=False):
     user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Участник"
     user_un = getattr(user, 'username', '') or ''
 
-    # 1. ПРОВЕРКА СКОРОСТИ ВХОДА (ДЕТЕКЦИЯ РЕЙДА)
+    # 1. ДЕТЕКЦИЯ РЕЙДА
     if not is_test:
         RECENT_JOINS.append((now, chat_id, user.id))
         thresh_cnt = max(2, db_get_int('raid_threshold_count', 5))
         thresh_sec = max(1, db_get_int('raid_threshold_seconds', 10))
-
         recent_in_this_chat = [t for t, c, u in RECENT_JOINS if c == chat_id and now - t <= thresh_sec]
 
         if len(recent_in_this_chat) >= thresh_cnt:
             if not RAID_MODE_ACTIVE.get(chat_id, False):
                 RAID_MODE_ACTIVE[chat_id] = True
                 log_raid_event("RAID_TRIGGERED", user.id, user_un, user_name, chat_id, f"ВКЛЮЧЁН РЕЖИМ РЕЙДА (>{thresh_cnt} входов за {thresh_sec}с)")
-                logging.warning(f"🚨 [Щит] Обнаружен рейд в чате {chat_id}! Включен массовый авто-бан!")
+                logging.warning(f"🚨 [Щит] Обнаружен рейд в чате {chat_id}! Включен авто-бан!")
 
             if chat_id in RAID_RESET_TASKS:
                 RAID_RESET_TASKS[chat_id].cancel()
             RAID_RESET_TASKS[chat_id] = asyncio.create_task(raid_reset_worker(chat_id))
 
-        # 2. ЕСЛИ РЕЖИМ РЕЙДА АКТИВЕН -> МГНОВЕННЫЙ БАН (БЕЗ КАПЧИ)
         if RAID_MODE_ACTIVE.get(chat_id, False):
-            try:
-                await penalty_ban(chat_id, user.id)
-                log_raid_event("RAID_AUTO_BAN", user.id, user_un, user_name, chat_id, "Мгновенный авто-бан во время рейда")
-                logging.info(f"🔨 [Щит] Рейд-бот {user.id} ({user_name}) авто-забанен!")
-            except Exception as e:
-                logging.error(f"Ошибка авто-бана рейдера {user.id}: {e}")
+            await penalty_ban(chat_id, user.id)
+            log_raid_event("RAID_AUTO_BAN", user.id, user_un, user_name, chat_id, "Мгновенный авто-бан")
+            logging.info(f"🔨 [Щит] Рейд-бот {user.id} ({user_name}) забанен!")
             return
 
-    # 3. ПРОВЕРКА: ВКЛЮЧЕНА ЛИ КАПЧА
+    # 2. ПРОВЕРКА КАПЧИ
     if db_get_int('captcha_enabled', 1) == 0 and not is_test:
-        logging.info("ℹ️ Капча выключена в настройках, пропуск выдачи.")
         return
 
-    # 4. ОБЫЧНЫЙ ВХОД -> МАТЕМАТИЧЕСКАЯ КАПЧА (ДО 30 ЕДИНИЦ)
+    # 3. ВЫДАЧА КАПЧИ
+    max_limit = db_get_int('math_max_limit', 30)
+    timeout_sec = db_get_int('captcha_timeout_sec', 180)
+    attempts_cnt = db_get_int('captcha_attempts', 2)
+    timeout_min = max(1, timeout_sec // 60)
+
     op = random.choice(['+', '-'])
     if op == '+':
-        a = random.randint(1, 15)
-        b = random.randint(1, 15)
+        a = random.randint(1, max_limit // 2)
+        b = random.randint(1, max_limit // 2)
         ans = a + b
     else:
-        a = random.randint(10, 30)
+        a = random.randint(10, max_limit)
         b = random.randint(1, a)
         ans = a - b
 
@@ -390,89 +361,70 @@ async def trigger_join_pipeline(chat_id, user, is_test=False):
     prefix = "🧪 **[ТЕСТОВЫЙ РЕЖИМ]**\n" if is_test else ""
     captcha_text = (
         f"{prefix}👋 Привет, {mention}!\n\n"
-        f"🛡️ **Для защиты реши пример за 3 минуты:**\n"
+        f"🛡️ **Для защиты реши пример за {timeout_min} мин:**\n"
         f"👉 **`{a} {op} {b} = ?`**\n\n"
-        f"• Напиши только **число** ответом в чат (у вас **2** попытки).\n"
+        f"• Напиши только **число** ответом в чат (у вас **{attempts_cnt}** попытки).\n"
         f"• Напишешь **текстом** вместо числа — КИК!\n"
-        f"• Ошибся числом 2 раза или таймаут — МЬЮТ!"
+        f"• Ошибся числом {attempts_cnt} раза или таймаут — МЬЮТ!"
     )
 
     try:
-        # Гарантированное получение сущности чата перед отправкой
         chat_entity = await client.get_entity(chat_id)
         msg = await client.send_message(chat_entity, captcha_text)
         task = asyncio.create_task(captcha_timeout_worker(chat_id, user.id, user_name, msg.id))
         
         PENDING_CAPTCHAS[(chat_id, user.id)] = {
             "answer": ans,
-            "attempts_left": 2,
+            "attempts_left": attempts_cnt,
             "captcha_msg_id": msg.id,
             "warn_msg_ids": [],
             "join_time": now,
             "task": task
         }
         log_raid_event("CAPTCHA_SENT", user.id, user_un, user_name, chat_id, f"Пример: {a} {op} {b} = {ans}")
-        logging.info(f"✅ [КАПЧА ОТПРАВЛЕНА] Сообщение #{msg.id} успешно отправлено пользователю {user.id}")
+        logging.info(f"✅ [КАПЧА] Сообщение отправлено пользователю {user.id}")
     except Exception as e:
-        logging.error(f"❌ [ОШИБКА ОТПРАВКИ КАПЧИ] chat={chat_id}, user={user.id}: {e}")
+        logging.error(f"❌ [ОШИБКА КАПЧИ] {user.id}: {e}")
 
-async def handle_raw_user_join(chat_id, user_id):
-    if db_get_int('shield_enabled', 1) == 0:
-        return
+async def fetch_user_and_trigger(chat_id, user_id):
     try:
-        u = await client.get_entity(user_id)
-        if u:
-            await trigger_join_pipeline(chat_id, u)
+        user = await client.get_entity(user_id)
+        await trigger_join_pipeline(chat_id, user)
     except Exception as e:
-        logging.error(f"[RAW Join Fetch Error] user_id={user_id}: {e}")
+        logging.error(f"Не удалось получить Entity пользователя {user_id}: {e}")
 
-# --- ГЛУБОКИЙ RAW MTPROTO ПЕРЕХВАТЧИК ВСЕХ ТИПОВ ВХОДОВ ---
+# --- ЖЕЛЕЗОБЕТОННЫЙ ПЕРЕХВАТ СИСТЕМНЫХ СООБЩЕНИЙ ---
+@client.on(events.NewMessage(func=lambda e: e.is_group and e.message.action))
+async def service_message_join_catcher(event):
+    action = event.message.action
+    chat_id = event.chat_id
+
+    # Логируем тип системного сообщения для отладки
+    logging.info(f"⚙️ [СИСТЕМНОЕ СООБЩЕНИЕ] Чат: {chat_id}, Действие: {type(action).__name__}")
+
+    user_ids_to_process = []
+
+    if isinstance(action, MessageActionChatAddUser):
+        user_ids_to_process = action.users
+    elif isinstance(action, (MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest, MessageActionChatJoined)):
+        if event.sender_id:
+            user_ids_to_process.append(event.sender_id)
+
+    for uid in user_ids_to_process:
+        asyncio.create_task(fetch_user_and_trigger(chat_id, uid))
+
+# --- ЗАПАСНОЙ ПЕРЕХВАТ ДЛЯ ЧАТОВ СО СКРЫТЫМИ УЧАСТНИКАМИ ---
 @client.on(events.Raw)
-async def on_raw_telegram_update(update):
-    if db_get_int('shield_enabled', 1) == 0:
-        return
+async def raw_participant_catcher(update):
+    if isinstance(update, UpdateChannelParticipant):
+        cid = getattr(update, 'channel_id', None)
+        uid = getattr(update, 'user_id', None)
+        new_p = getattr(update, 'new_participant', None)
 
-    try:
-        # 1. Перехват сообщений со служебными действиями (вход по ссылке, заявке, добавление)
-        if isinstance(update, (UpdateNewChannelMessage, UpdateNewMessage)):
-            msg = getattr(update, 'message', None)
-            if isinstance(msg, MessageService):
-                action = getattr(msg, 'action', None)
-                peer = getattr(msg, 'peer_id', None)
-                
-                chat_id = None
-                if hasattr(peer, 'channel_id'):
-                    chat_id = int(f"-100{peer.channel_id}")
-                elif hasattr(peer, 'chat_id'):
-                    chat_id = -peer.chat_id
-
-                if not chat_id:
-                    return
-
-                # Вход по инвайт-ссылке или заявке в приватную группу
-                if isinstance(action, (MessageActionChatJoinedByLink, MessageActionChatJoinedByRequest)):
-                    from_id = getattr(msg, 'from_id', None)
-                    uid = getattr(from_id, 'user_id', None) if from_id else None
-                    if uid:
-                        asyncio.create_task(handle_raw_user_join(chat_id, uid))
-
-                # Добавление участников
-                elif isinstance(action, MessageActionChatAddUser):
-                    users_added = getattr(action, 'users', [])
-                    for uid in users_added:
-                        asyncio.create_task(handle_raw_user_join(chat_id, uid))
-
-        # 2. Перехват системных обновлений участников супергрупп (для админов)
-        elif isinstance(update, UpdateChannelParticipant):
-            cid = getattr(update, 'channel_id', None)
-            uid = getattr(update, 'user_id', None)
-            new_p = getattr(update, 'new_participant', None)
-
-            if cid and uid and new_p and not isinstance(new_p, ChannelParticipantSelf):
-                chat_id = int(f"-100{cid}")
-                asyncio.create_task(handle_raw_user_join(chat_id, uid))
-    except Exception:
-        pass
+        if cid and uid and new_p and not isinstance(new_p, ChannelParticipantSelf):
+            chat_id = int(f"-100{cid}")
+            logging.info(f"⚙️ [RAW СОБЫТИЕ] Скрытый вход пользователя {uid} в чат {chat_id}")
+            asyncio.create_task(fetch_user_and_trigger(chat_id, uid))
 
 # --- ГЛАВНАЯ ЛОГИКА ОБРАБОТКИ ОБЫЧНЫХ СООБЩЕНИЙ ---
 async def delete_after(event, delay, reason=""):
@@ -483,15 +435,13 @@ async def delete_after(event, delay, reason=""):
     except Exception as e:
         logging.warning(f"Не удалось удалить сообщение {event.id}: {e}")
 
-@client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
+@client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private and not e.message.action))
 async def message_handler(event):
     text = event.raw_text.strip() if event.raw_text else None
-    if not text:
-        return
+    if not text: return
 
     sender = await event.get_sender()
-    if not sender:
-        return
+    if not sender: return
 
     chat_id = event.chat_id
     user_id = sender.id
@@ -499,7 +449,6 @@ async def message_handler(event):
     sender_username = getattr(sender, 'username', '') or 'unknown'
     user_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Участник"
 
-    # Игнорируем Лекса и sudo-команды
     if sender_username.lower() == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo"):
         return
 
@@ -509,79 +458,72 @@ async def message_handler(event):
         captcha_data = PENDING_CAPTCHAS[captcha_key]
         expected_ans = captcha_data["answer"]
 
-        # 1. ВАРИАНТ: НАПИСАЛ ТЕКСТОМ ВМЕСТО ЧИСЛА -> КИК
+        # 1. ТЕКСТ ВМЕСТО ЧИСЛА
         if not text.isdigit():
+            action = db_get_str('captcha_action_text', 'kick')
             captcha_data["task"].cancel()
             del PENDING_CAPTCHAS[captcha_key]
             
-            log_raid_event("CAPTCHA_TEXT_FAIL", user_id, sender_username, user_name, chat_id, f"Наказание: КИК (написал текст: '{text[:20]}')")
-            await penalty_kick(chat_id, user_id)
+            log_raid_event("CAPTCHA_TEXT_FAIL", user_id, sender_username, user_name, chat_id, f"Наказание: {action.upper()} (текст: '{text[:20]}')")
             
+            if action == "kick": await penalty_kick(chat_id, user_id)
+            elif action == "ban": await penalty_ban(chat_id, user_id)
+            else: await penalty_mute(chat_id, user_id)
+
             try:
                 msgs_to_del = [captcha_data["captcha_msg_id"], event.id] + captcha_data.get("warn_msg_ids", [])
                 await client.delete_messages(chat_id, msgs_to_del)
-            except Exception:
-                pass
+            except Exception: pass
             return
 
-        # 2. ВАРИАНТ: НАПИСАЛ ЧИСЛО
+        # 2. НАПИСАЛ ЧИСЛО
         val = int(text)
         if val == expected_ans:
-            # 2.1 ВЕРНЫЙ ОТВЕТ -> СНИМАЕМ КАПЧУ И ЧИСТИМ ЧАТ
             captcha_data["task"].cancel()
             del PENDING_CAPTCHAS[captcha_key]
-            
             log_raid_event("CAPTCHA_PASSED", user_id, sender_username, user_name, chat_id, f"Верный ответ: {expected_ans}")
-            
             try:
                 msgs_to_del = [captcha_data["captcha_msg_id"], event.id] + captcha_data.get("warn_msg_ids", [])
                 await client.delete_messages(chat_id, msgs_to_del)
-            except Exception:
-                pass
+            except Exception: pass
             return
         else:
-            # 2.2 ОШИБСЯ ЧИСЛОМ -> ДАЕМ ПОПЫТКУ ИЛИ МЬЮТИМ
             captcha_data["attempts_left"] -= 1
             log_raid_event("CAPTCHA_WRONG_NUMBER", user_id, sender_username, user_name, chat_id, f"Ошибся числом (ввел {val}, осталось: {captcha_data['attempts_left']})")
             
             if captcha_data["attempts_left"] > 0:
-                # ВТОРАЯ ПОПЫТКА
                 try:
-                    warn_msg = await client.send_message(
-                        chat_id, 
-                        f"⚠️ [{user_name}](tg://user?id={user_id}), неправильный ответ! У вас осталась еще **{captcha_data['attempts_left']}** попытка."
-                    )
+                    warn_msg = await client.send_message(chat_id, f"⚠️ [{user_name}](tg://user?id={user_id}), неправильный ответ! У вас осталась еще **{captcha_data['attempts_left']}** попытка.")
                     captcha_data.setdefault("warn_msg_ids", []).append(warn_msg.id)
                     await client.delete_messages(chat_id, event.id)
-                except Exception:
-                    pass
+                except Exception: pass
                 return
             else:
-                # ПОПЫТКИ ИСЧЕРПАНЫ -> МЬЮТ
+                action = db_get_str('captcha_action_fail', 'mute')
                 captcha_data["task"].cancel()
                 del PENDING_CAPTCHAS[captcha_key]
                 
-                log_raid_event("CAPTCHA_FAIL_NUMBERS", user_id, sender_username, user_name, chat_id, "Наказание: МЬЮТ (исчерпал 2 попытки чисел)")
-                await penalty_mute(chat_id, user_id)
+                log_raid_event("CAPTCHA_FAIL_NUMBERS", user_id, sender_username, user_name, chat_id, f"Наказание: {action.upper()} (исчерпал попытки)")
+                
+                if action == "kick": await penalty_kick(chat_id, user_id)
+                elif action == "ban": await penalty_ban(chat_id, user_id)
+                else: await penalty_mute(chat_id, user_id)
                 
                 try:
                     msgs_to_del = [captcha_data["captcha_msg_id"], event.id] + captcha_data.get("warn_msg_ids", [])
                     await client.delete_messages(chat_id, msgs_to_del)
-                except Exception:
-                    pass
+                except Exception: pass
                 return
 
     if is_bot:
         short_text = text[:35].replace('\n', ' ')
         logging.info(f"📩 Бот @{sender_username} прислал: '{short_text}...'")
 
-    # --- СЦЕНАРИЙ 1: Сообщение от ЧЕЛОВЕКА ---
     if not is_bot:
         patterns = db_list_regex()
         for pattern in patterns:
             pattern_clean = pattern.strip()
-            if not pattern_clean:
-                continue
+            if not pattern_clean: continue
             try:
                 if re.match(pattern_clean, text, re.IGNORECASE):
                     delay = db_get_int('delay_user_command', 5)
@@ -589,28 +531,19 @@ async def message_handler(event):
                     logging.info(f"🚨 [ЧЕЛОВЕК @{sender_username}] {reason}. Удаление через {delay} сек.")
                     asyncio.create_task(delete_after(event, delay, reason))
                     return
-            except re.error as e:
-                logging.error(f"Ошибка в регексе '{pattern_clean}': {e}")
-
-    # --- СЦЕНАРИЙ 2: Сообщение от БОТА ---
+            except re.error as e: logging.error(f"Ошибка в регексе '{pattern_clean}': {e}")
     else:
         exceptions = db_list_exceptions()
         for exc_word in exceptions:
             exc_clean = exc_word.strip()
-            if not exc_clean:
-                continue
-
+            if not exc_clean: continue
             exc_matched = False
-            if exc_clean.lower() in text.lower():
-                exc_matched = True
+            if exc_clean.lower() in text.lower(): exc_matched = True
             elif any(c in exc_clean for c in r".*+?^$[]{}()|\\"):
                 try:
                     m = re.search(exc_clean, text, re.IGNORECASE)
-                    if m and len(m.group(0)) > 1:
-                        exc_matched = True
-                except re.error:
-                    pass
-
+                    if m and len(m.group(0)) > 1: exc_matched = True
+                except re.error: pass
             if exc_matched:
                 logging.info(f"🛡️ [БОТ @{sender_username}] Найдено исключение: '{exc_clean}'. Сообщение НЕ будет удалено!")
                 return
@@ -618,20 +551,14 @@ async def message_handler(event):
         banwords = db_list_banwords()
         for word, delay in banwords:
             word_clean = word.strip()
-            if not word_clean:
-                continue
-
+            if not word_clean: continue
             matched = False
-            if word_clean.lower() in text.lower():
-                matched = True
+            if word_clean.lower() in text.lower(): matched = True
             elif any(c in word_clean for c in r".*+?^$[]{}()|\\"):
                 try:
                     m = re.search(word_clean, text, re.IGNORECASE)
-                    if m and len(m.group(0)) > 1:
-                        matched = True
-                except re.error:
-                    pass
-
+                    if m and len(m.group(0)) > 1: matched = True
+                except re.error: pass
             if matched:
                 reason = f"Бан-слово бота: '{word_clean}'"
                 logging.info(f"🚨 [БОТ @{sender_username}] {reason}. Удаление через {delay} сек.")
@@ -646,11 +573,10 @@ async def owner_commands_handler(event):
     subcommand = parts[1] if len(parts) > 1 else None
     value = " ".join(parts[2:]) if len(parts) > 2 else None
 
-    # --- ЛАКОНИЧНОЕ ГЛАВНОЕ МЕНЮ SUDO ---
     if command == "sudo" and not subcommand:
         delay_user = db_get_int('delay_user_command', 5)
         help_text = (
-            "🛡️ **LEX Sniper Userbot v3.7 активен!**\n\n"
+            "🛡️ **LEX Sniper Userbot v3.8 активен!**\n\n"
             "**🛡️ Система Щита (Анти-Рейд & Капча):**\n"
             "• `sudo shield` — Настройки Щита, Капчи, Порога рейда и Отчёты\n\n"
             "**Просмотр логов:**\n"
@@ -667,12 +593,10 @@ async def owner_commands_handler(event):
         return await safe_reply(event, help_text)
 
     try:
-        # --- ЕДИНАЯ КОМАНДА УПРАВЛЕНИЯ ЩИТОМ (SUDO SHIELD) ---
         if subcommand == "shield":
             sub2 = parts[2].lower() if len(parts) > 2 else None
             val2 = " ".join(parts[3:]).strip() if len(parts) > 3 else None
 
-            # 1. Показ статуса и меню
             if not sub2:
                 shield_on = db_get_int('shield_enabled', 1) == 1
                 captcha_on = db_get_int('captcha_enabled', 1) == 1
@@ -695,17 +619,20 @@ async def owner_commands_handler(event):
                     "• `sudo shield on` | `sudo shield off` — Вкл/выкл весь Щит\n"
                     "• `sudo shield captcha on` | `sudo shield captcha off` — Вкл/выкл капчу\n"
                     "• `sudo shield rate 2/10` — Порог авто-рейда (2 входа за 10 сек)\n"
-                    "• `sudo shield test` — Запустить тестовую капчу для себя"
+                    "• `sudo shield test` — Запустить тестовую капчу для себя\n"
+                    "• `sudo shield text {kick|mute|ban}` — Наказание за текст\n"
+                    "• `sudo shield fail {mute|kick|ban}` — Наказание за ошибки/таймаут\n"
+                    "• `sudo shield attempts {число}` — Попытки на числа\n"
+                    "• `sudo shield timeout {секунды}` — Время на капчу\n"
+                    "• `sudo shield limit {число}` — Макс. предел чисел"
                 )
                 return await safe_reply(event, shield_help)
 
-            # Мгновенный тест работы капчи
             elif sub2 == "test":
                 me = await client.get_me()
                 await event.reply("🧪 **Запускаю тестовую капчу...**")
                 return await trigger_join_pipeline(event.chat_id, me, is_test=True)
 
-            # 2. Вкл/выкл весь Щит
             elif sub2 in ["on", "1", "true", "вкл"]:
                 db_set('shield_enabled', '1')
                 return await event.reply("✅ Главный Щит **ВКЛЮЧЁН**.")
@@ -714,7 +641,6 @@ async def owner_commands_handler(event):
                 db_set('shield_enabled', '0')
                 return await event.reply("❌ Главный Щит полностью **ВЫКЛЮЧЁН**.")
 
-            # 3. Вкл/выкл Капчу (Анти-Рейд остаётся активным)
             elif sub2 == "captcha" and val2:
                 v = val2.lower()
                 if v in ["on", "1", "true", "вкл"]:
@@ -724,7 +650,6 @@ async def owner_commands_handler(event):
                     db_set('captcha_enabled', '0')
                     return await event.reply("❌ Математическая капча **ВЫКЛЮЧЕНА** (Анти-рейд защита остаётся активной!).")
 
-            # 4. Порог скорости авто-рейда (2/10 или 2 10)
             elif sub2 in ["rate", "threshold"] and val2:
                 match = re.match(r"^(\d+)[/\s,]+(\d+)$", val2)
                 if match:
@@ -734,16 +659,45 @@ async def owner_commands_handler(event):
                         db_set('raid_threshold_count', cnt)
                         db_set('raid_threshold_seconds', sec)
                         return await event.reply(f"✅ Порог авто-рейда изменён: **{cnt}** входов за **{sec}** сек.")
-                    else:
-                        return await event.reply("❌ Количество входов должно быть от 2, а секунды от 1!")
+                    else: return await event.reply("❌ Количество входов должно быть от 2, а секунды от 1!")
                 elif val2.isdigit() and int(val2) >= 2:
                     db_set('raid_threshold_count', val2)
                     curr_sec = db_get_int('raid_threshold_seconds', 10)
                     return await event.reply(f"✅ Порог авто-рейда изменён: **{val2}** входов за **{curr_sec}** сек.")
-                else:
-                    return await event.reply("❌ Укажите значение в формате `2/10` (2 входа за 10 сек)!")
+                else: return await event.reply("❌ Укажите значение в формате `2/10` (2 входа за 10 сек)!")
 
-            # 5. Отчёт
+            elif sub2 == "text" and val2:
+                v = val2.lower()
+                if v in ["kick", "mute", "ban"]:
+                    db_set('captcha_action_text', v)
+                    return await event.reply(f"✅ Наказание за ввод текста изменено на **{v.upper()}**.")
+                else: return await event.reply("❌ Варианты: `kick`, `mute`, `ban`")
+
+            elif sub2 == "fail" and val2:
+                v = val2.lower()
+                if v in ["kick", "mute", "ban"]:
+                    db_set('captcha_action_fail', v)
+                    return await event.reply(f"✅ Наказание за провал/таймаут изменено на **{v.upper()}**.")
+                else: return await event.reply("❌ Варианты: `kick`, `mute`, `ban`")
+
+            elif sub2 == "attempts" and val2:
+                if val2.isdigit() and int(val2) > 0:
+                    db_set('captcha_attempts', val2)
+                    return await event.reply(f"✅ Кол-во попыток на числа изменено на **{val2}**.")
+                else: return await event.reply("❌ Значение должно быть числом > 0.")
+
+            elif sub2 == "timeout" and val2:
+                if val2.isdigit() and int(val2) >= 10:
+                    db_set('captcha_timeout_sec', val2)
+                    return await event.reply(f"⏱ Время на капчу изменено на **{val2}** сек.")
+                else: return await event.reply("❌ Укажите секунды (не менее 10).")
+
+            elif sub2 == "limit" and val2:
+                if val2.isdigit() and int(val2) >= 10:
+                    db_set('math_max_limit', val2)
+                    return await event.reply(f"🔢 Предел чисел в примере изменён на **{val2}**.")
+                else: return await event.reply("❌ Укажите число от 10.")
+
             elif sub2 in ["report", "stat", "stats"]:
                 conn = sqlite3.connect(DB_NAME)
                 cur = conn.cursor()
@@ -766,16 +720,15 @@ async def owner_commands_handler(event):
                     f"🧩 **Математические капчи:**\n"
                     f"• Выдано при входе: `{sent_cnt}`\n"
                     f"• Успешно решено: `{pass_cnt}`\n"
-                    f"• Кикнуто за ВВОД ТЕКСТА: `{text_fail_cnt}`\n"
-                    f"• Мьютов за ошибки чисел: `{num_fail_cnt}`\n"
-                    f"• Мьютов за ТАЙМАУТ (3 мин): `{timeout_cnt}`\n\n"
+                    f"• Наказано за ВВОД ТЕКСТА: `{text_fail_cnt}`\n"
+                    f"• Наказано за ошибки чисел: `{num_fail_cnt}`\n"
+                    f"• Наказано за ТАЙМАУТ: `{timeout_cnt}`\n\n"
                     f"⚡ **Анти-Рейд Защита:**\n"
                     f"• Срабатываний рейда: `{raid_cnt}`\n"
                     f"• Авто-забанено рейдеров: `{ban_cnt}`"
                 )
                 return await safe_reply(event, report, filename="shield_report.txt")
 
-            # 6. Логи
             elif sub2 in ["logs", "log"]:
                 conn = sqlite3.connect(DB_NAME)
                 cur = conn.cursor()
