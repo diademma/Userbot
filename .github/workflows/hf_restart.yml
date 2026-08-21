@@ -1,0 +1,25 @@
+name: Restart HuggingFace Space
+
+on:
+  schedule:
+    # Запуск каждые 12 часов (в 00:00 и 12:00 UTC)
+    - cron: '0 0,12 * * *'
+  workflow_dispatch: # Добавляет кнопку для ручного теста
+
+jobs:
+  restart-hf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send API Restart to Hugging Face
+        run: |
+          echo "Отправка запроса на перезапуск спейса..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+            https://huggingface.co/api/spaces/tio1212/1358/restart)
+          echo "Код ответа от Hugging Face: $RESPONSE"
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Спейс успешно перезапущен и таймер сна сброшен!"
+          else
+            echo "❌ Что-то пошло не так, код ошибки: $RESPONSE"
+            exit 1
+          fi
