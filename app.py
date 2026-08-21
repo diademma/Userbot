@@ -1,4 +1,4 @@
-# CODEVER: v3.8 | Sniper Userbot (Fixed Music Inline Detection & Bot Family Whitelist)
+# CODEVER: v4.0 | Sniper Userbot (Absolute Music & Voice Immunity, Auto-RP, Permissions)
 import os
 import re
 import sys
@@ -41,7 +41,7 @@ OWNER_ID = 5421909121
 LEX_BOT_USERNAME = "my_LEX_superbot"
 DB_NAME = "sniper_memory_v3.db"
 
-# --- БЕЛЫЙ СПИСОК НАШИХ БОТОВ (Они знают друг друга и не считаются рекламой) ---
+# --- БЕЛЫЙ СПИСОК НАШИХ БОТОВ ---
 KNOWN_BOT_USERNAMES = {
     "celya", "smartspeech_sber_bot", "vkmusicalrobot", 
     "vkmusictopbot", "polegamebot", "shmalala_bot", 
@@ -64,7 +64,7 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v3.8 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v4.0 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
         logging.info("БД сохранена в GitHub.")
     except Exception as e:
@@ -296,11 +296,11 @@ REGEX_INVITE = re.compile(r"t\.me/(\+|joinchat/|addlist/)", re.IGNORECASE)
 def is_ad(msg, author_tag: str) -> bool:
     text = (msg.raw_text or "") + " " + (msg.message or "")
 
-    # 1. Инвайт-ссылка t.me/+ (Всегда спам)
+    # 1. Инвайт-ссылка t.me/+
     if REGEX_INVITE.search(text):
         return True
 
-    # 2. Упоминание ЧУЖИХ неизвестных ботов (не из нашего семейства KNOWN_BOT_USERNAMES)
+    # 2. Упоминание ЧУЖИХ ботов (не из нашего семейства)
     for m in REGEX_FOREIGN_BOT.findall(text):
         bot_clean = m.lstrip('@').lower()
         if bot_clean not in KNOWN_BOT_USERNAMES and bot_clean not in author_tag.lower():
@@ -336,39 +336,50 @@ def is_ad(msg, author_tag: str) -> bool:
 
     return False
 
-def classify_bot_message(msg, author_tag: str) -> int | None:
+def classify_bot_message(event, author_tag: str) -> int | None:
+    msg = event.message
     text = (msg.raw_text or "").strip()
     tag_lower = author_tag.lower()
+    is_reply = bool(event.is_reply or getattr(msg, 'reply_to_msg_id', None))
 
-    # 1. Белый список (Исключения)
+    # =========================================================================
+    # ПРИОРИТЕТ 1: АБСОЛЮТНЫЙ ИММУНИТЕТ ДЛЯ МУЗЫКИ И СБЕРА (НЕ ТРОГАТЬ НИКОГДА)
+    # =========================================================================
+    
+    # Музыкальный бот: если скинул трек, ответил реплаем или отправил через via @
+    if "vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower:
+        if msg.audio or is_reply or getattr(msg, 'via_bot_id', None) or "via @" in text.lower():
+            return None  # Вечный иммунитет
+
+    # Любой аудиофайл/трек в чате:
+    if msg.audio:
+        return None
+
+    # Сбер текстовик (SaluteSpeech):
+    if "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
+        return None
+
+    # Белый список слов-исключений
     for exc in db_get_exceptions():
         if exc.lower() in text.lower():
             return None
 
-    # 2. МУЗЫКА И АУДИОФАЙЛЫ -> ВЕЧНЫЙ ИММУНИТЕТ
-    if msg.audio or msg.voice:
-        if not REGEX_INVITE.search(text):
-            return None
-
-    # 3. СБЕР / SALUTESPEECH -> ВЕЧНЫЙ ИММУНИТЕТ
-    if "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
-        return None
-
-    # 4. Проверка на спам/рекламу
+    # =========================================================================
+    # ПРИОРИТЕТ 2: ЧИСТАЯ РЕКЛАМА (Снос 0 сек)
+    # =========================================================================
     if is_ad(msg, author_tag):
         return 0
 
-    # 5. Плеер VK Music (даже если отправлен как сервисный инлайн via bot)
-    if "vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower:
-        if msg.via_bot_id or "via @" in text or "скачано" in text.lower():
-            return None
-
-    # 6. Банворды с кастомными таймерами
+    # =========================================================================
+    # ПРИОРИТЕТ 3: БАНВОРДЫ
+    # =========================================================================
     for b_word, b_delay in db_get_banwords():
         if b_word.lower() in text.lower():
             return b_delay
 
-    # 7. Длинные сообщения / статьи Teletype / большие меню -> info_delay (30с)
+    # =========================================================================
+    # ПРИОРИТЕТ 4: ДЛИННЫЕ МЕНЮ / ТОПЫ / СТАТЬИ (30 сек)
+    # =========================================================================
     lines_count = len(text.split('\n'))
     has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
     is_long_text = len(text) > 250 or lines_count >= 5 or "teletype.in" in text.lower()
@@ -376,7 +387,9 @@ def classify_bot_message(msg, author_tag: str) -> int | None:
     if is_long_text or has_large_buttons:
         return db_get_timer('info_delay', 30)
 
-    # 8. РП-команды и короткие ответы ботов -> rp_delay (10с)
+    # =========================================================================
+    # ПРИОРИТЕТ 5: РП-КОМАНДЫ И ОБЫЧНЫЕ ДЕЙСТВИЯ БОТОВ (10 сек)
+    # =========================================================================
     return db_get_timer('rp_delay', 10)
 
 def extract_pattern(msg, author_tag: str) -> str:
@@ -387,8 +400,7 @@ def extract_pattern(msg, author_tag: str) -> str:
 
     mentions = REGEX_FOREIGN_BOT.findall(text)
     for m in mentions:
-        m_clean = m.lstrip('@').lower()
-        if m_clean not in KNOWN_BOT_USERNAMES and m_clean not in author_tag.lower():
+        if m.lstrip('@').lower() not in KNOWN_BOT_USERNAMES and m.lstrip('@').lower() not in author_tag.lower():
             return rf"{re.escape(m)}\b"
 
     if msg.buttons:
@@ -465,7 +477,7 @@ async def main_handler(event):
 
     logging.info(f"🤖 Сообщение от бота [{bot_tag}]: '{text[:35].replace(chr(10), ' ')}...'")
 
-    delay = classify_bot_message(msg, bot_tag)
+    delay = classify_bot_message(event, bot_tag)
 
     if delay is None:
         logging.info(f"🛡️ [{bot_tag}] Сообщение с вечным иммунитетом.")
@@ -495,7 +507,7 @@ async def sudo_handler(event):
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v3.8 — Панель управления**\n\n"
+            "🎯 **Sniper Userbot v4.0 — Панель управления**\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
@@ -657,7 +669,7 @@ async def main():
     init_db()
     await client.start()
     me = await client.get_me()
-    logging.info(f"Sniper v3.8 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v4.0 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
