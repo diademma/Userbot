@@ -1,4 +1,4 @@
-# CODEVER: v3.6 | Robust Sniper Userbot (Multi-Identifier, Auto-RP, Logs & Permissions)
+# CODEVER: v3.7 | Robust Sniper Userbot (Fixed SaluteSpeech Immunity & Multi-Bot Heuristics)
 import os
 import re
 import sys
@@ -41,7 +41,7 @@ OWNER_ID = 5421909121
 LEX_BOT_USERNAME = "my_LEX_superbot"
 DB_NAME = "sniper_memory_v3.db"
 
-# --- ИДЕНТИФИКАТОРЫ НАШИХ БОТОВ (Юзернеймы и Имена) ---
+# --- ИДЕНТИФИКАТОРЫ БОТОВ ---
 KNOWN_BOT_USERNAMES = {
     "celya", "smartspeech_sber_bot", "vkmusicalrobot", 
     "vkmusictopbot", "polegamebot", "shmalala_bot", 
@@ -51,7 +51,7 @@ KNOWN_BOT_USERNAMES = {
 }
 
 KNOWN_BOT_TITLES = [
-    "celestiana", "salutespeech", "vk music", "музыка из вк", 
+    "celestiana", "salutespeech", "sber", "vk music", "музыка из вк", 
     "поле чудес", "iris", "ирис", "мафия", "quiz", "музон", "siren"
 ]
 
@@ -64,7 +64,7 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v3.6 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v3.7 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
         logging.info("БД сохранена в GitHub.")
     except Exception as e:
@@ -264,7 +264,7 @@ async def is_authorized(event) -> bool:
             pass
     return False
 
-# --- ОПРЕДЕЛЕНИЕ НАШЕГО БОТА (Юзернейм + Имя + Кэш) ---
+# --- ОПРЕДЕЛЕНИЕ БОТА ---
 def identify_tracked_bot(sender) -> tuple[bool, str]:
     if not sender:
         return False, ""
@@ -274,17 +274,14 @@ def identify_tracked_bot(sender) -> tuple[bool, str]:
     last_name = (getattr(sender, 'last_name', '') or '').lower()
     full_title = f"{first_name} {last_name}".strip()
 
-    # 1. Проверка по юзернейму
     if username:
         if username in KNOWN_BOT_USERNAMES or any(b in username for b in KNOWN_BOT_USERNAMES):
             return True, username
 
-    # 2. Проверка по названию бота
     for title_kw in KNOWN_BOT_TITLES:
         if title_kw in full_title:
             return True, username or full_title
 
-    # 3. Если это бот
     if getattr(sender, 'bot', False):
         for b in KNOWN_BOT_USERNAMES:
             if b in full_title:
@@ -334,28 +331,34 @@ def is_ad(msg, author_tag: str) -> bool:
 
 def classify_bot_message(msg, author_tag: str) -> int | None:
     text = (msg.raw_text or "").strip()
+    tag_lower = author_tag.lower()
 
     # 1. Белый список (Исключения)
     for exc in db_get_exceptions():
         if exc.lower() in text.lower():
             return None
 
-    # 2. Полезный SaluteSpeech (реплай) и Музыка MP3
-    if "salute" in author_tag.lower() and msg.is_reply:
-        return None
-    if msg.audio:
+    # 2. Проверка на рекламу (для всех)
+    if is_ad(msg, author_tag):
+        return 0
+
+    # 3. СБЕР / SALUTESPEECH — ВЕЧНЫЙ ИММУНИТЕТ
+    if "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
         return None
 
-    # 3. Банворды
+    # 4. VK MUSIC / АУДИО — ВЕЧНЫЙ ИММУНИТЕТ
+    if msg.audio or msg.voice or msg.video:
+        return None
+    if "vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower:
+        if msg.via_bot_id or "скачано" in text.lower() or "найдено" in text.lower():
+            return None
+
+    # 5. Банворды с кастомными задержками
     for b_word, b_delay in db_get_banwords():
         if b_word.lower() in text.lower():
             return b_delay
 
-    # 4. Реклама -> 0 сек
-    if is_ad(msg, author_tag):
-        return 0
-
-    # 5. Длинные сообщения / статьи Teletype / большие меню -> info_delay (30с)
+    # 6. Длинные сообщения / статьи Teletype / большие меню -> info_delay (30с)
     lines_count = len(text.split('\n'))
     has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
     is_long_text = len(text) > 250 or lines_count >= 5 or "teletype.in" in text.lower()
@@ -363,7 +366,7 @@ def classify_bot_message(msg, author_tag: str) -> int | None:
     if is_long_text or has_large_buttons:
         return db_get_timer('info_delay', 30)
 
-    # 6. РП-команды и короткие ответы (обнять, поцеловать, статус, реплики игр) -> rp_delay (10с)
+    # 7. РП-команды и короткие ответы ботов -> rp_delay (10с)
     return db_get_timer('rp_delay', 10)
 
 def extract_pattern(msg, author_tag: str) -> str:
@@ -414,7 +417,6 @@ async def main_handler(event):
     msg = event.message
     text = (msg.raw_text or "").strip()
 
-    # Получаем отправителя с защитой от пустых кэшей
     sender = None
     try:
         sender = await event.get_sender()
@@ -433,7 +435,7 @@ async def main_handler(event):
 
     is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
 
-    # 1. СООБЩЕНИЯ ОТ ЛЮДЕЙ (Регексы)
+    # 1. ЛЮДИ (Регексы)
     if not is_bot:
         for pattern, delay in db_get_human_regex():
             try:
@@ -445,12 +447,11 @@ async def main_handler(event):
                 pass
         return
 
-    # 2. СООБЩЕНИЯ ОТ БОТОВ
+    # 2. БОТЫ
     is_tracked, bot_tag = identify_tracked_bot(sender)
     if not is_tracked:
-        return  # Не наш бот — пропускаем
+        return
 
-    # Логируем появление бота для прозрачности
     logging.info(f"🤖 Сообщение от бота [{bot_tag}]: '{text[:35].replace(chr(10), ' ')}...'")
 
     delay = classify_bot_message(msg, bot_tag)
@@ -483,7 +484,7 @@ async def sudo_handler(event):
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v3.6 — Панель управления**\n\n"
+            "🎯 **Sniper Userbot v3.7 — Панель управления**\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
@@ -645,7 +646,7 @@ async def main():
     init_db()
     await client.start()
     me = await client.get_me()
-    logging.info(f"Sniper v3.6 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v3.7 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
