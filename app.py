@@ -1,4 +1,4 @@
-# CODEVER: v3.7 | Robust Sniper Userbot (Fixed SaluteSpeech Immunity & Multi-Bot Heuristics)
+# CODEVER: v3.8 | Sniper Userbot (Fixed Music Inline Detection & Bot Family Whitelist)
 import os
 import re
 import sys
@@ -41,7 +41,7 @@ OWNER_ID = 5421909121
 LEX_BOT_USERNAME = "my_LEX_superbot"
 DB_NAME = "sniper_memory_v3.db"
 
-# --- ИДЕНТИФИКАТОРЫ БОТОВ ---
+# --- БЕЛЫЙ СПИСОК НАШИХ БОТОВ (Они знают друг друга и не считаются рекламой) ---
 KNOWN_BOT_USERNAMES = {
     "celya", "smartspeech_sber_bot", "vkmusicalrobot", 
     "vkmusictopbot", "polegamebot", "shmalala_bot", 
@@ -64,7 +64,7 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v3.7 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v3.8 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
         logging.info("БД сохранена в GitHub.")
     except Exception as e:
@@ -296,13 +296,17 @@ REGEX_INVITE = re.compile(r"t\.me/(\+|joinchat/|addlist/)", re.IGNORECASE)
 def is_ad(msg, author_tag: str) -> bool:
     text = (msg.raw_text or "") + " " + (msg.message or "")
 
+    # 1. Инвайт-ссылка t.me/+ (Всегда спам)
     if REGEX_INVITE.search(text):
         return True
 
+    # 2. Упоминание ЧУЖИХ неизвестных ботов (не из нашего семейства KNOWN_BOT_USERNAMES)
     for m in REGEX_FOREIGN_BOT.findall(text):
-        if m.lstrip('@').lower() not in author_tag.lower():
+        bot_clean = m.lstrip('@').lower()
+        if bot_clean not in KNOWN_BOT_USERNAMES and bot_clean not in author_tag.lower():
             return True
 
+    # 3. Кнопки с внешними инвайтами или сторонними ботами
     if msg.buttons:
         for row in msg.buttons:
             for btn in row:
@@ -311,15 +315,18 @@ def is_ad(msg, author_tag: str) -> bool:
                     if "t.me/+" in u or "joinchat" in u:
                         return True
                     for bu in REGEX_FOREIGN_BOT.findall(u):
-                        if bu.lstrip('@').lower() not in author_tag.lower():
+                        b_clean = bu.lstrip('@').lower()
+                        if b_clean not in KNOWN_BOT_USERNAMES and b_clean not in author_tag.lower():
                             return True
 
+    # 4. Скрытые ссылки
     if msg.entities:
         for ent in msg.entities:
             if isinstance(ent, MessageEntityTextUrl) and ent.url:
                 if REGEX_INVITE.search(ent.url):
                     return True
 
+    # 5. Спам-паттерны
     for pat in db_get_ads():
         try:
             if re.search(pat, text, re.IGNORECASE):
@@ -338,27 +345,30 @@ def classify_bot_message(msg, author_tag: str) -> int | None:
         if exc.lower() in text.lower():
             return None
 
-    # 2. Проверка на рекламу (для всех)
-    if is_ad(msg, author_tag):
-        return 0
+    # 2. МУЗЫКА И АУДИОФАЙЛЫ -> ВЕЧНЫЙ ИММУНИТЕТ
+    if msg.audio or msg.voice:
+        if not REGEX_INVITE.search(text):
+            return None
 
-    # 3. СБЕР / SALUTESPEECH — ВЕЧНЫЙ ИММУНИТЕТ
+    # 3. СБЕР / SALUTESPEECH -> ВЕЧНЫЙ ИММУНИТЕТ
     if "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
         return None
 
-    # 4. VK MUSIC / АУДИО — ВЕЧНЫЙ ИММУНИТЕТ
-    if msg.audio or msg.voice or msg.video:
-        return None
+    # 4. Проверка на спам/рекламу
+    if is_ad(msg, author_tag):
+        return 0
+
+    # 5. Плеер VK Music (даже если отправлен как сервисный инлайн via bot)
     if "vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower:
-        if msg.via_bot_id or "скачано" in text.lower() or "найдено" in text.lower():
+        if msg.via_bot_id or "via @" in text or "скачано" in text.lower():
             return None
 
-    # 5. Банворды с кастомными задержками
+    # 6. Банворды с кастомными таймерами
     for b_word, b_delay in db_get_banwords():
         if b_word.lower() in text.lower():
             return b_delay
 
-    # 6. Длинные сообщения / статьи Teletype / большие меню -> info_delay (30с)
+    # 7. Длинные сообщения / статьи Teletype / большие меню -> info_delay (30с)
     lines_count = len(text.split('\n'))
     has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
     is_long_text = len(text) > 250 or lines_count >= 5 or "teletype.in" in text.lower()
@@ -366,7 +376,7 @@ def classify_bot_message(msg, author_tag: str) -> int | None:
     if is_long_text or has_large_buttons:
         return db_get_timer('info_delay', 30)
 
-    # 7. РП-команды и короткие ответы ботов -> rp_delay (10с)
+    # 8. РП-команды и короткие ответы ботов -> rp_delay (10с)
     return db_get_timer('rp_delay', 10)
 
 def extract_pattern(msg, author_tag: str) -> str:
@@ -377,7 +387,8 @@ def extract_pattern(msg, author_tag: str) -> str:
 
     mentions = REGEX_FOREIGN_BOT.findall(text)
     for m in mentions:
-        if m.lstrip('@').lower() not in author_tag.lower():
+        m_clean = m.lstrip('@').lower()
+        if m_clean not in KNOWN_BOT_USERNAMES and m_clean not in author_tag.lower():
             return rf"{re.escape(m)}\b"
 
     if msg.buttons:
@@ -484,7 +495,7 @@ async def sudo_handler(event):
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v3.7 — Панель управления**\n\n"
+            "🎯 **Sniper Userbot v3.8 — Панель управления**\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
@@ -646,7 +657,7 @@ async def main():
     init_db()
     await client.start()
     me = await client.get_me()
-    logging.info(f"Sniper v3.7 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v3.8 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
