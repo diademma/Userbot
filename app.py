@@ -1,4 +1,4 @@
-# CODEVER: v4.1 | Sniper Userbot (Fixed DB Syntax, Multi-Word Phrases & Sequence Matching)
+# CODEVER: v4.2 | Sniper Userbot (Zero-Tolerance Ad Engine, Unsolicited URL Trap & Gift Detection)
 import os
 import re
 import sys
@@ -64,7 +64,7 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v4.1 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v4.2 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
         logging.info("БД сохранена в GitHub.")
     except Exception as e:
@@ -91,7 +91,8 @@ def init_db():
         r"\d+\s*(р|₽|руб)[/\s]*(мес|месяц)",
         r"взломали\s+все\s+приложения",
         r"пошл\w+\s+стикер",
-        r"бесплатн\w+\s+(подарок|ключ)",
+        r"(бесплатн\w+|получен|забирай|забери|твой)\s+(подарок|ключ|приз|бонус)",
+        r"выбери\s+скорее",
         r"обход\w*\s+(глушилок|белых\s+списков|блокиров)",
         r"чат[,\s]+в\s+который\s+заходят",
         r"добро\s+пожаловать\s+в\s+чат",
@@ -166,7 +167,6 @@ def db_get_ads():
     conn.close()
     return [i[0] for i in items]
 
-# ИСПРАВЛЕННЫЕ ФУНКЦИИ ИСКЛЮЧЕНИЙ
 def db_add_exception(phrase: str):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -176,7 +176,7 @@ def db_add_exception(phrase: str):
         save_db_to_git()
         return True
     except Exception as e:
-        logging.error(f"Ошибка добавления исключения: {e}")
+        logging.error(f"Ошибка БД: {e}")
         return False
 
 def db_del_exception(phrase: str):
@@ -195,7 +195,6 @@ def db_get_exceptions():
     conn.close()
     return [i[0] for i in items if i[0]]
 
-# ИСПРАВЛЕННЫЕ ФУНКЦИИ БАНВОРДОВ
 def db_add_banword(phrase: str, delay: int = 0):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -205,7 +204,7 @@ def db_add_banword(phrase: str, delay: int = 0):
         save_db_to_git()
         return True
     except Exception as e:
-        logging.error(f"Ошибка добавления банворда: {e}")
+        logging.error(f"Ошибка БД: {e}")
         return False
 
 def db_del_banword(phrase: str):
@@ -224,7 +223,6 @@ def db_get_banwords():
     conn.close()
     return items
 
-# ИСПРАВЛЕННЫЕ ФУНКЦИИ РЕГЕКСОВ
 def db_add_human_regex(pattern: str, delay: int = 5):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -234,7 +232,7 @@ def db_add_human_regex(pattern: str, delay: int = 5):
         save_db_to_git()
         return True
     except Exception as e:
-        logging.error(f"Ошибка добавления регекса: {e}")
+        logging.error(f"Ошибка БД: {e}")
         return False
 
 def db_del_human_regex(pattern: str):
@@ -253,13 +251,7 @@ def db_get_human_regex():
     conn.close()
     return items
 
-# --- ПАРСЕР МНОГОСЛОВНЫХ АРГУМЕНТОВ ---
 def parse_phrase_and_delay(val: str, default_delay: int = 0) -> tuple[str, int]:
-    """
-    Разделяет фразу любой длины и таймер (если число указано в конце).
-    Пример: 'купить дешевый впн 15' -> ('купить дешевый впн', 15)
-    Пример: 'Правила чата' -> ('Правила чата', 0)
-    """
     parts = val.strip().split()
     if not parts:
         return "", default_delay
@@ -311,29 +303,29 @@ def identify_tracked_bot(sender) -> tuple[bool, str]:
 
     return False, ""
 
-# --- АНАЛИЗАТОР РЕКЛАМЫ ---
+# --- АНАЛИЗАТОР РЕКЛАМЫ (СВЕРХЧУВСТВИТЕЛЬНЫЙ ДЕТЕКТОР) ---
 REGEX_FOREIGN_BOT = re.compile(r"@[a-zA-Z0-9_]{4,}bot\b", re.IGNORECASE)
 REGEX_INVITE = re.compile(r"t\.me/(\+|joinchat/|addlist/)", re.IGNORECASE)
+REGEX_GIFT_TRAP = re.compile(r"(подарок|подарка|подарки|приз|призы|бонус|выбери\s+скорее|забирай|забери)", re.IGNORECASE)
 
-def is_ad(msg, author_tag: str) -> bool:
+def is_ad(msg, author_tag: str, is_reply: bool) -> bool:
     text = (msg.raw_text or "") + " " + (msg.message or "")
 
-    # 1. Инвайт-ссылка t.me/+
+    # 1. Инвайт-ссылка в любом виде
     if REGEX_INVITE.search(text):
         return True
 
-    # 2. Упоминание ЧУЖИХ ботов
-    for m in REGEX_FOREIGN_BOT.findall(text):
-        bot_clean = m.lstrip('@').lower()
-        if bot_clean not in KNOWN_BOT_USERNAMES and bot_clean not in author_tag.lower():
-            return True
-
-    # 3. Кнопки с внешними инвайтами или сторонними ботами
+    # 2. КНОПКИ: Если сообщение БЕЗ реплая и имеет хотя бы одну URL-ссылку (со стрелочкой ↗)
+    # В играх/РП кнопки ВСЕГДА callback_data (без url). URL-кнопка без реплая = 100% РЕКЛАМА!
     if msg.buttons:
         for row in msg.buttons:
             for btn in row:
                 if btn.url:
                     u = btn.url.lower()
+                    # Если без реплая есть любая ссылка в кнопке -> это спам-ловушка
+                    if not is_reply:
+                        return True
+                    # Если есть инвайт или сторонний бот
                     if "t.me/+" in u or "joinchat" in u:
                         return True
                     for bu in REGEX_FOREIGN_BOT.findall(u):
@@ -341,14 +333,24 @@ def is_ad(msg, author_tag: str) -> bool:
                         if b_clean not in KNOWN_BOT_USERNAMES and b_clean not in author_tag.lower():
                             return True
 
-    # 4. Скрытые ссылки
+    # 3. Упоминание чужих ботов в тексте
+    for m in REGEX_FOREIGN_BOT.findall(text):
+        bot_clean = m.lstrip('@').lower()
+        if bot_clean not in KNOWN_BOT_USERNAMES and bot_clean not in author_tag.lower():
+            return True
+
+    # 4. Скрытые ссылки под текстом или эмодзи
     if msg.entities:
         for ent in msg.entities:
             if isinstance(ent, MessageEntityTextUrl) and ent.url:
-                if REGEX_INVITE.search(ent.url):
+                if not is_reply or REGEX_INVITE.search(ent.url):
                     return True
 
-    # 5. Спам-паттерны
+    # 5. Ловушки подарков/призов без реплая
+    if not is_reply and REGEX_GIFT_TRAP.search(text) and (msg.buttons or "👇" in text or "👉" in text):
+        return True
+
+    # 6. Спам-паттерны из базы
     for pat in db_get_ads():
         try:
             if re.search(pat, text, re.IGNORECASE):
@@ -369,33 +371,33 @@ def classify_bot_message(event, author_tag: str) -> int | None:
     # ПРИОРИТЕТ 1: АБСОЛЮТНЫЙ ИММУНИТЕТ (МУЗЫКА, СБЕР, БЕЛЫЙ СПИСОК)
     # =========================================================================
     
-    # 1.1 Музыкальный бот: реплай, аудиофайл или инлайн via @
+    # Музыкальный бот (только если это аудио или ответ)
     if "vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower:
         if msg.audio or is_reply or getattr(msg, 'via_bot_id', None) or "via @" in text.lower():
             return None
 
-    # Любой аудиофайл/трек:
+    # Любой аудиофайл:
     if msg.audio:
         return None
 
-    # 1.2 Сбер текстовик (SaluteSpeech):
+    # Сбер текстовик (SaluteSpeech):
     if "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
         return None
 
-    # 1.3 Белый список исключений (Точное совпадение словосочетания)
+    # Белый список исключений
     for exc in db_get_exceptions():
         norm_exc = " ".join(exc.lower().split())
         if norm_exc in norm_text:
             return None
 
     # =========================================================================
-    # ПРИОРИТЕТ 2: ЧИСТАЯ РЕКЛАМА (Снос 0 сек)
+    # ПРИОРИТЕТ 2: ЧИСТАЯ РЕКЛАМА И СПАМ-ЛОВУШКИ (Снос 0 сек)
     # =========================================================================
-    if is_ad(msg, author_tag):
+    if is_ad(msg, author_tag, is_reply):
         return 0
 
     # =========================================================================
-    # ПРИОРИТЕТ 3: БАНВОРДЫ (Точное совпадение словосочетания)
+    # ПРИОРИТЕТ 3: БАНВОРДЫ
     # =========================================================================
     for b_phrase, b_delay in db_get_banwords():
         norm_phrase = " ".join(b_phrase.lower().split())
@@ -434,7 +436,7 @@ def extract_pattern(msg, author_tag: str) -> str:
                 if btn.url and ("t.me/" in btn.url or "http" in btn.url):
                     return re.escape(btn.url)
 
-    lines = [l.strip() for l in text.split('\n') if len(l.strip().split()) >= 3]
+    lines = [l.strip() for l in text.split('\n') if len(l.strip().split()) >= 2]
     if lines:
         clean = re.sub(r"[^\w\sа-яА-ЯёЁa-zA-Z0-9]", "", lines[0]).strip()
         words = clean.split()[:4]
@@ -483,7 +485,7 @@ async def main_handler(event):
 
     is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
 
-    # 1. ЛЮДИ (Регексы фразовые и точные)
+    # 1. ЛЮДИ (Регексы)
     if not is_bot:
         for pattern, delay in db_get_human_regex():
             try:
@@ -509,7 +511,7 @@ async def main_handler(event):
         return
 
     if delay == 0:
-        logging.info(f"💥 [{bot_tag}] РЕКЛАМА/БАНВОРД -> Мгновенный снос (0с)")
+        logging.info(f"💥 [{bot_tag}] РЕКЛАМА/ЛОВУШКА -> Мгновенный снос (0с)")
         asyncio.create_task(delete_after(event, 0, f"Реклама [{bot_tag}]"))
     elif delay <= 15:
         logging.info(f"🎭 [{bot_tag}] РП / действие -> Удаление через {delay}с")
@@ -532,7 +534,7 @@ async def sudo_handler(event):
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v4.1 — Панель управления**\n\n"
+            "🎯 **Sniper Userbot v4.2 — Панель управления**\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
@@ -571,7 +573,7 @@ async def sudo_handler(event):
             await asyncio.sleep(4)
             await c.delete()
 
-        # 2. ИСКЛЮЧЕНИЯ (ФРАЗЫ)
+        # 2. ИСКЛЮЧЕНИЯ
         elif cmd in ["+искл", "+exc"]:
             phrase = val.strip()
             if event.is_reply and not phrase:
@@ -596,7 +598,7 @@ async def sudo_handler(event):
             items = db_get_exceptions()
             await event.reply("🛡️ **Список исключений:**\n" + ("\n".join([f"• `{i}`" for i in items]) if items else "Пусто."))
 
-        # 3. БАНВОРДЫ (ФРАЗЫ И СЛОВОСОЧЕТАНИЯ)
+        # 3. БАНВОРДЫ
         elif cmd in ["+бан", "+ban"] and val:
             phrase, delay = parse_phrase_and_delay(val, default_delay=0)
             if not phrase:
@@ -618,7 +620,7 @@ async def sudo_handler(event):
             items = db_get_banwords()
             await event.reply("🚫 **Список бан-фраз:**\n" + ("\n".join([f"• `{w}` ({d}с)" for w, d in items]) if items else "Пусто."))
 
-        # 4. РЕГЕКСЫ (ДЛЯ ЛЮДЕЙ)
+        # 4. РЕГЕКСЫ
         elif cmd in ["+рег", "+reg"] and val:
             pattern, delay = parse_phrase_and_delay(val, default_delay=5)
             if not pattern:
@@ -640,7 +642,7 @@ async def sudo_handler(event):
             items = db_get_human_regex()
             await event.reply("🧹 **Регексы людей:**\n" + ("\n".join([f"• `{p}` ({d}с)" for p, d in items]) if items else "Пусто."))
 
-        # 5. ДОВЕРЕННЫЕ ПОЛЬЗОВАТЕЛИ
+        # 5. ДОВЕРЕННЫЕ
         elif cmd in ["+дов", "+trust"]:
             target_user = None
             if event.is_reply:
@@ -712,7 +714,7 @@ async def main():
     init_db()
     await client.start()
     me = await client.get_me()
-    logging.info(f"Sniper v4.1 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v4.2 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
