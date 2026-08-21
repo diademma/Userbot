@@ -1,4 +1,4 @@
-# CODEVER: v4.0 | Sniper Userbot (Absolute Music & Voice Immunity, Auto-RP, Permissions)
+# CODEVER: v4.1 | Sniper Userbot (Fixed DB Syntax, Multi-Word Phrases & Sequence Matching)
 import os
 import re
 import sys
@@ -64,7 +64,7 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v4.0 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v4.1 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
         logging.info("БД сохранена в GitHub.")
     except Exception as e:
@@ -166,21 +166,23 @@ def db_get_ads():
     conn.close()
     return [i[0] for i in items]
 
-def db_add_exception(word: str):
+# ИСПРАВЛЕННЫЕ ФУНКЦИИ ИСКЛЮЧЕНИЙ
+def db_add_exception(phrase: str):
     try:
         conn = sqlite3.connect(DB_NAME)
-        conn.execute("INSERT INTO exceptions (word) VALUES (?, ?)", (word.strip(),))
+        conn.execute("INSERT OR REPLACE INTO exceptions (word) VALUES (?)", (phrase.strip(),))
         conn.commit()
         conn.close()
         save_db_to_git()
         return True
-    except Exception:
+    except Exception as e:
+        logging.error(f"Ошибка добавления исключения: {e}")
         return False
 
-def db_del_exception(word: str):
+def db_del_exception(phrase: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("DELETE FROM exceptions WHERE word = ?", (word.strip(),))
+    cur.execute("DELETE FROM exceptions WHERE LOWER(word) = LOWER(?)", (phrase.strip(),))
     cnt = conn.total_changes
     conn.commit()
     conn.close()
@@ -191,23 +193,25 @@ def db_get_exceptions():
     conn = sqlite3.connect(DB_NAME)
     items = conn.execute("SELECT word FROM exceptions").fetchall()
     conn.close()
-    return [i[0] for i in items]
+    return [i[0] for i in items if i[0]]
 
-def db_add_banword(word: str, delay: int = 0):
+# ИСПРАВЛЕННЫЕ ФУНКЦИИ БАНВОРДОВ
+def db_add_banword(phrase: str, delay: int = 0):
     try:
         conn = sqlite3.connect(DB_NAME)
-        conn.execute("INSERT OR REPLACE INTO banwords (word, delay) VALUES (?, ?)", (word.strip(), delay))
+        conn.execute("INSERT OR REPLACE INTO banwords (word, delay) VALUES (?, ?)", (phrase.strip(), delay))
         conn.commit()
         conn.close()
         save_db_to_git()
         return True
-    except Exception:
+    except Exception as e:
+        logging.error(f"Ошибка добавления банворда: {e}")
         return False
 
-def db_del_banword(word: str):
+def db_del_banword(phrase: str):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("DELETE FROM banwords WHERE word = ?", (word.strip(),))
+    cur.execute("DELETE FROM banwords WHERE LOWER(word) = LOWER(?)", (phrase.strip(),))
     cnt = conn.total_changes
     conn.commit()
     conn.close()
@@ -220,6 +224,7 @@ def db_get_banwords():
     conn.close()
     return items
 
+# ИСПРАВЛЕННЫЕ ФУНКЦИИ РЕГЕКСОВ
 def db_add_human_regex(pattern: str, delay: int = 5):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -228,7 +233,8 @@ def db_add_human_regex(pattern: str, delay: int = 5):
         conn.close()
         save_db_to_git()
         return True
-    except Exception:
+    except Exception as e:
+        logging.error(f"Ошибка добавления регекса: {e}")
         return False
 
 def db_del_human_regex(pattern: str):
@@ -246,6 +252,22 @@ def db_get_human_regex():
     items = conn.execute("SELECT pattern, delay FROM human_regex").fetchall()
     conn.close()
     return items
+
+# --- ПАРСЕР МНОГОСЛОВНЫХ АРГУМЕНТОВ ---
+def parse_phrase_and_delay(val: str, default_delay: int = 0) -> tuple[str, int]:
+    """
+    Разделяет фразу любой длины и таймер (если число указано в конце).
+    Пример: 'купить дешевый впн 15' -> ('купить дешевый впн', 15)
+    Пример: 'Правила чата' -> ('Правила чата', 0)
+    """
+    parts = val.strip().split()
+    if not parts:
+        return "", default_delay
+    if len(parts) > 1 and parts[-1].isdigit():
+        delay = int(parts[-1])
+        phrase = " ".join(parts[:-1]).strip()
+        return phrase, delay
+    return " ".join(parts).strip(), default_delay
 
 # --- ПРОВЕРКА ПРАВ SUDO ---
 async def is_authorized(event) -> bool:
@@ -300,7 +322,7 @@ def is_ad(msg, author_tag: str) -> bool:
     if REGEX_INVITE.search(text):
         return True
 
-    # 2. Упоминание ЧУЖИХ ботов (не из нашего семейства)
+    # 2. Упоминание ЧУЖИХ ботов
     for m in REGEX_FOREIGN_BOT.findall(text):
         bot_clean = m.lstrip('@').lower()
         if bot_clean not in KNOWN_BOT_USERNAMES and bot_clean not in author_tag.lower():
@@ -339,29 +361,31 @@ def is_ad(msg, author_tag: str) -> bool:
 def classify_bot_message(event, author_tag: str) -> int | None:
     msg = event.message
     text = (msg.raw_text or "").strip()
+    norm_text = " ".join(text.lower().split())
     tag_lower = author_tag.lower()
     is_reply = bool(event.is_reply or getattr(msg, 'reply_to_msg_id', None))
 
     # =========================================================================
-    # ПРИОРИТЕТ 1: АБСОЛЮТНЫЙ ИММУНИТЕТ ДЛЯ МУЗЫКИ И СБЕРА (НЕ ТРОГАТЬ НИКОГДА)
+    # ПРИОРИТЕТ 1: АБСОЛЮТНЫЙ ИММУНИТЕТ (МУЗЫКА, СБЕР, БЕЛЫЙ СПИСОК)
     # =========================================================================
     
-    # Музыкальный бот: если скинул трек, ответил реплаем или отправил через via @
+    # 1.1 Музыкальный бот: реплай, аудиофайл или инлайн via @
     if "vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower:
         if msg.audio or is_reply or getattr(msg, 'via_bot_id', None) or "via @" in text.lower():
-            return None  # Вечный иммунитет
+            return None
 
-    # Любой аудиофайл/трек в чате:
+    # Любой аудиофайл/трек:
     if msg.audio:
         return None
 
-    # Сбер текстовик (SaluteSpeech):
+    # 1.2 Сбер текстовик (SaluteSpeech):
     if "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
         return None
 
-    # Белый список слов-исключений
+    # 1.3 Белый список исключений (Точное совпадение словосочетания)
     for exc in db_get_exceptions():
-        if exc.lower() in text.lower():
+        norm_exc = " ".join(exc.lower().split())
+        if norm_exc in norm_text:
             return None
 
     # =========================================================================
@@ -371,10 +395,11 @@ def classify_bot_message(event, author_tag: str) -> int | None:
         return 0
 
     # =========================================================================
-    # ПРИОРИТЕТ 3: БАНВОРДЫ
+    # ПРИОРИТЕТ 3: БАНВОРДЫ (Точное совпадение словосочетания)
     # =========================================================================
-    for b_word, b_delay in db_get_banwords():
-        if b_word.lower() in text.lower():
+    for b_phrase, b_delay in db_get_banwords():
+        norm_phrase = " ".join(b_phrase.lower().split())
+        if norm_phrase in norm_text:
             return b_delay
 
     # =========================================================================
@@ -388,7 +413,7 @@ def classify_bot_message(event, author_tag: str) -> int | None:
         return db_get_timer('info_delay', 30)
 
     # =========================================================================
-    # ПРИОРИТЕТ 5: РП-КОМАНДЫ И ОБЫЧНЫЕ ДЕЙСТВИЯ БОТОВ (10 сек)
+    # ПРИОРИТЕТ 5: РП-КОМАНДЫ И ДЕЙСТВИЯ (10 сек)
     # =========================================================================
     return db_get_timer('rp_delay', 10)
 
@@ -458,11 +483,11 @@ async def main_handler(event):
 
     is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
 
-    # 1. ЛЮДИ (Регексы)
+    # 1. ЛЮДИ (Регексы фразовые и точные)
     if not is_bot:
         for pattern, delay in db_get_human_regex():
             try:
-                if re.match(pattern, text, re.IGNORECASE):
+                if re.search(pattern, text, re.IGNORECASE):
                     logging.info(f"🚨 [Человек] Регекс '{pattern}' -> Удаление через {delay}с")
                     asyncio.create_task(delete_after(event, delay, f"Human reg: {pattern}"))
                     return
@@ -507,15 +532,15 @@ async def sudo_handler(event):
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v4.0 — Панель управления**\n\n"
+            "🎯 **Sniper Userbot v4.1 — Панель управления**\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
-            "• `sudo +искл {слово}` *(или реплай)* — Добавить исключение\n"
-            "• `sudo -искл {слово}` / `sudo исклы` — Удалить / Список\n\n"
-            "🚫 **Банворды (Слова):**\n"
-            "• `sudo +бан {слово} [сек=0]` — Добавить банворд\n"
-            "• `sudo -бан {слово}` / `sudo баны` — Удалить / Список\n\n"
+            "• `sudo +искл {фраза}` *(или реплай)* — Добавить исключение\n"
+            "• `sudo -искл {фраза}` / `sudo исклы` — Удалить / Список\n\n"
+            "🚫 **Банворды (Фразы от 1 до 10 слов):**\n"
+            "• `sudo +бан {фраза} [сек=0]` — Добавить бан-фразу\n"
+            "• `sudo -бан {фраза}` / `sudo баны` — Удалить / Список\n\n"
             "🧹 **Регексы (Люди):**\n"
             "• `sudo +рег {паттерн} [сек=5]` — Добавить регекс\n"
             "• `sudo -рег {паттерн}` / `sudo регексы` — Удалить / Список\n\n"
@@ -546,58 +571,76 @@ async def sudo_handler(event):
             await asyncio.sleep(4)
             await c.delete()
 
-        # 2. ИСКЛЮЧЕНИЯ
+        # 2. ИСКЛЮЧЕНИЯ (ФРАЗЫ)
         elif cmd in ["+искл", "+exc"]:
-            if event.is_reply and not val:
+            phrase = val.strip()
+            if event.is_reply and not phrase:
                 target = await event.get_reply_message()
-                words = (target.raw_text or "").split()
-                val = words[0] if words else ""
-            if not val:
-                return await event.reply("❌ Укажи слово: `sudo +искл {слово}`")
-            db_add_exception(val)
-            await event.reply(f"🛡️ Слово `{val}` добавлено в белый список (Вечный иммунитет).")
+                phrase = (target.raw_text or "").strip()
+            
+            if not phrase:
+                return await event.reply("❌ Укажи слово/фразу: `sudo +искл {фраза}` или ответь на сообщение.")
+            
+            if db_add_exception(phrase):
+                await event.reply(f"🛡️ Фраза `{phrase}` добавлена в белый список (Вечный иммунитет)!")
+            else:
+                await event.reply("⚠️ Ошибка сохранения в базу.")
 
         elif cmd in ["-искл", "-exc"] and val:
-            if db_del_exception(val): await event.reply(f"🗑 Исключение `{val}` удалено.")
-            else: await event.reply("❌ Не найдено.")
+            if db_del_exception(val): 
+                await event.reply(f"🗑 Исключение `{val}` удалено.")
+            else: 
+                await event.reply("❌ Исключение не найдено.")
 
         elif cmd in ["исклы", "excs", "исключения"]:
             items = db_get_exceptions()
             await event.reply("🛡️ **Список исключений:**\n" + ("\n".join([f"• `{i}`" for i in items]) if items else "Пусто."))
 
-        # 3. БАНВОРДЫ
+        # 3. БАНВОРДЫ (ФРАЗЫ И СЛОВОСОЧЕТАНИЯ)
         elif cmd in ["+бан", "+ban"] and val:
-            sp = val.split()
-            word = sp[0]
-            delay = int(sp[1]) if len(sp) > 1 and sp[1].isdigit() else 0
-            db_add_banword(word, delay)
-            await event.reply(f"🚫 Банворд `{word}` добавлен (таймер: **{delay}с**).")
+            phrase, delay = parse_phrase_and_delay(val, default_delay=0)
+            if not phrase:
+                return await event.reply("❌ Укажи фразу: `sudo +бан {фраза} [сек]`")
+            
+            if db_add_banword(phrase, delay):
+                await event.reply(f"🚫 Бан-фраза `{phrase}` добавлена (снос через **{delay}с**).")
+            else:
+                await event.reply("⚠️ Ошибка сохранения.")
 
         elif cmd in ["-бан", "-ban"] and val:
-            if db_del_banword(val): await event.reply(f"🗑 Банворд `{val}` удален.")
-            else: await event.reply("❌ Не найдено.")
+            phrase, _ = parse_phrase_and_delay(val, default_delay=0)
+            if db_del_banword(phrase): 
+                await event.reply(f"🗑 Бан-фраза `{phrase}` удалена.")
+            else: 
+                await event.reply("❌ Бан-фраза не найдена.")
 
         elif cmd in ["баны", "bans", "банворды"]:
             items = db_get_banwords()
-            await event.reply("🚫 **Список банвордов:**\n" + ("\n".join([f"• `{w}` ({d}с)" for w, d in items]) if items else "Пусто."))
+            await event.reply("🚫 **Список бан-фраз:**\n" + ("\n".join([f"• `{w}` ({d}с)" for w, d in items]) if items else "Пусто."))
 
-        # 4. РЕГЕКСЫ
+        # 4. РЕГЕКСЫ (ДЛЯ ЛЮДЕЙ)
         elif cmd in ["+рег", "+reg"] and val:
-            sp = val.split()
-            pat = sp[0]
-            delay = int(sp[1]) if len(sp) > 1 and sp[1].isdigit() else 5
-            db_add_human_regex(pat, delay)
-            await event.reply(f"🧹 Регекс `{pat}` добавлен (таймер: **{delay}с**).")
+            pattern, delay = parse_phrase_and_delay(val, default_delay=5)
+            if not pattern:
+                return await event.reply("❌ Укажи паттерн: `sudo +рег {паттерн} [сек]`")
+            
+            if db_add_human_regex(pattern, delay):
+                await event.reply(f"🧹 Регекс `{pattern}` добавлен (таймаут: **{delay}с**).")
+            else:
+                await event.reply("⚠️ Ошибка сохранения.")
 
         elif cmd in ["-рег", "-reg"] and val:
-            if db_del_human_regex(val): await event.reply(f"🗑 Регекс `{val}` удален.")
-            else: await event.reply("❌ Не найден.")
+            pattern, _ = parse_phrase_and_delay(val, default_delay=5)
+            if db_del_human_regex(pattern): 
+                await event.reply(f"🗑 Регекс `{pattern}` удален.")
+            else: 
+                await event.reply("❌ Регекс не найден.")
 
         elif cmd in ["регексы", "regs"]:
             items = db_get_human_regex()
             await event.reply("🧹 **Регексы людей:**\n" + ("\n".join([f"• `{p}` ({d}с)" for p, d in items]) if items else "Пусто."))
 
-        # 5. ДОВЕРЕННЫЕ
+        # 5. ДОВЕРЕННЫЕ ПОЛЬЗОВАТЕЛИ
         elif cmd in ["+дов", "+trust"]:
             target_user = None
             if event.is_reply:
@@ -613,7 +656,7 @@ async def sudo_handler(event):
                 uid = target_user.id
                 u_name = getattr(target_user, 'username', '') or getattr(target_user, 'first_name', str(uid))
                 db_add_trusted(uid, u_name)
-                await event.reply(f"✅ Пользователь **{u_name}** (`{uid}`) добавлен в список доверенных!")
+                await event.reply(f"✅ Пользователь **{u_name}** (`{uid}`) добавлен в доверенные!")
             else:
                 await event.reply("❌ Укажи пользователя: ответь на его смс или напиши `sudo +дов @username` / `ID`.")
 
@@ -664,12 +707,12 @@ async def sudo_handler(event):
 # --- СТАРТ ---
 async def main():
     if not all([API_ID, API_HASH, SESSION_STRING]):
-        logging.critical("ОШИБКА: Заполните переменные окружения API_ID, API_HASH, SESSION_STRING!")
+        logging.critical("ОШИБКА: Заполните переменные API_ID, API_HASH, SESSION_STRING!")
         return
     init_db()
     await client.start()
     me = await client.get_me()
-    logging.info(f"Sniper v4.0 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v4.1 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
