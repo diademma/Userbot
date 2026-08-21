@@ -1,4 +1,4 @@
-# CODEVER: v3.5 | Intuitive Sniper Userbot (Smart Anti-Ad, Permissions, Banwords & Regex)
+# CODEVER: v3.6 | Robust Sniper Userbot (Multi-Identifier, Auto-RP, Logs & Permissions)
 import os
 import re
 import sys
@@ -13,7 +13,7 @@ from telethon.tl.types import User, MessageEntityTextUrl
 
 # --- БУФЕР ЛОГОВ В ПАМЯТИ ---
 class MemoryLogHandler(logging.Handler):
-    def __init__(self, capacity=50):
+    def __init__(self, capacity=60):
         super().__init__()
         self.buffer = deque(maxlen=capacity)
 
@@ -23,10 +23,10 @@ class MemoryLogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
-    def get_logs(self, limit=15):
+    def get_logs(self, limit=20):
         return list(self.buffer)[-limit:] if self.buffer else []
 
-mem_logs = MemoryLogHandler(capacity=50)
+mem_logs = MemoryLogHandler(capacity=60)
 mem_logs.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -41,14 +41,19 @@ OWNER_ID = 5421909121
 LEX_BOT_USERNAME = "my_LEX_superbot"
 DB_NAME = "sniper_memory_v3.db"
 
-# --- СПИСОК ОТСЛЕЖИВАЕМЫХ БОТОВ ---
-TRACKED_BOTS = {
+# --- ИДЕНТИФИКАТОРЫ НАШИХ БОТОВ (Юзернеймы и Имена) ---
+KNOWN_BOT_USERNAMES = {
     "celya", "smartspeech_sber_bot", "vkmusicalrobot", 
     "vkmusictopbot", "polegamebot", "shmalala_bot", 
     "truemafiabot", "quizbot", "gram_piarbot", 
     "thelacosterobot", "givesharebot", "igravgorodabotbot", 
-    "iris_black_bot"
+    "iris_black_bot", "iris_cm_bot", "iris_dp_bot", "iris_bot"
 }
+
+KNOWN_BOT_TITLES = [
+    "celestiana", "salutespeech", "vk music", "музыка из вк", 
+    "поле чудес", "iris", "ирис", "мафия", "quiz", "музон", "siren"
+]
 
 # --- GIT СИНХРОНИЗАЦИЯ ---
 def save_db_to_git():
@@ -59,9 +64,9 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v3.5 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v3.6 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
-        logging.info("База данных сохранена в GitHub.")
+        logging.info("БД сохранена в GitHub.")
     except Exception as e:
         logging.warning(f"Ошибка сохранения в Git: {e}")
 
@@ -76,11 +81,9 @@ def init_db():
     cur.execute("CREATE TABLE IF NOT EXISTS trusted_users (user_id INTEGER PRIMARY KEY, username TEXT)")
     cur.execute("CREATE TABLE IF NOT EXISTS timers (key TEXT PRIMARY KEY, sec INTEGER)")
     
-    # Дефолтные настройки
     cur.execute("INSERT OR IGNORE INTO timers (key, sec) VALUES ('rp_delay', 10)")
     cur.execute("INSERT OR IGNORE INTO timers (key, sec) VALUES ('info_delay', 30)")
     
-    # Базовые спам-шаблоны
     base_ads = [
         r"t\.me/(\+|joinchat/|addlist/)",
         r"vless|happ\b|shadowsocks|outline",
@@ -99,7 +102,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ФУНКЦИИ ДОСТУПА К БД ---
+# --- ФУНКЦИИ БД ---
 def db_get_timer(key: str, default: int) -> int:
     conn = sqlite3.connect(DB_NAME)
     row = conn.cursor().execute("SELECT sec FROM timers WHERE key = ?", (key,)).fetchone()
@@ -113,7 +116,6 @@ def db_set_timer(key: str, sec: int):
     conn.close()
     save_db_to_git()
 
-# Доверенные пользователи
 def db_add_trusted(user_id: int, username: str = ""):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -147,7 +149,6 @@ def db_get_trusted_ids() -> set[int]:
     conn.close()
     return {i[0] for i in items}
 
-# Реклама и шаблоны
 def db_add_ad(pattern: str):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -165,11 +166,10 @@ def db_get_ads():
     conn.close()
     return [i[0] for i in items]
 
-# Исключения
 def db_add_exception(word: str):
     try:
         conn = sqlite3.connect(DB_NAME)
-        conn.execute("INSERT INTO exceptions (word) VALUES (?)", (word.strip(),))
+        conn.execute("INSERT INTO exceptions (word) VALUES (?, ?)", (word.strip(),))
         conn.commit()
         conn.close()
         save_db_to_git()
@@ -193,7 +193,6 @@ def db_get_exceptions():
     conn.close()
     return [i[0] for i in items]
 
-# Банворды
 def db_add_banword(word: str, delay: int = 0):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -221,7 +220,6 @@ def db_get_banwords():
     conn.close()
     return items
 
-# Регексы людей
 def db_add_human_regex(pattern: str, delay: int = 5):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -249,21 +247,14 @@ def db_get_human_regex():
     conn.close()
     return items
 
-# --- ПРОВЕРКА ПРАВ ДОСТУПА (Owner + Chat Admins + Trusted) ---
+# --- ПРОВЕРКА ПРАВ SUDO ---
 async def is_authorized(event) -> bool:
     sender_id = event.sender_id
     if not sender_id:
         return False
-    
-    # 1. Владелец
-    if sender_id == OWNER_ID:
+    if sender_id == OWNER_ID or sender_id in db_get_trusted_ids():
         return True
 
-    # 2. Список доверенных в БД
-    if sender_id in db_get_trusted_ids():
-        return True
-
-    # 3. Администраторы группы
     if event.is_group or event.is_channel:
         try:
             perms = await event.client.get_permissions(event.chat_id, sender_id)
@@ -271,21 +262,48 @@ async def is_authorized(event) -> bool:
                 return True
         except Exception:
             pass
-
     return False
 
-# --- ДЕТЕКЦИЯ РЕКЛАМЫ И КЛАССИФИКАЦИЯ ---
+# --- ОПРЕДЕЛЕНИЕ НАШЕГО БОТА (Юзернейм + Имя + Кэш) ---
+def identify_tracked_bot(sender) -> tuple[bool, str]:
+    if not sender:
+        return False, ""
+    
+    username = (getattr(sender, 'username', '') or '').lower().lstrip('@')
+    first_name = (getattr(sender, 'first_name', '') or '').lower()
+    last_name = (getattr(sender, 'last_name', '') or '').lower()
+    full_title = f"{first_name} {last_name}".strip()
+
+    # 1. Проверка по юзернейму
+    if username:
+        if username in KNOWN_BOT_USERNAMES or any(b in username for b in KNOWN_BOT_USERNAMES):
+            return True, username
+
+    # 2. Проверка по названию бота
+    for title_kw in KNOWN_BOT_TITLES:
+        if title_kw in full_title:
+            return True, username or full_title
+
+    # 3. Если это бот
+    if getattr(sender, 'bot', False):
+        for b in KNOWN_BOT_USERNAMES:
+            if b in full_title:
+                return True, username or full_title
+
+    return False, ""
+
+# --- АНАЛИЗАТОР РЕКЛАМЫ ---
 REGEX_FOREIGN_BOT = re.compile(r"@[a-zA-Z0-9_]{4,}bot\b", re.IGNORECASE)
 REGEX_INVITE = re.compile(r"t\.me/(\+|joinchat/|addlist/)", re.IGNORECASE)
 
-def is_ad(msg, author_clean: str) -> bool:
+def is_ad(msg, author_tag: str) -> bool:
     text = (msg.raw_text or "") + " " + (msg.message or "")
 
     if REGEX_INVITE.search(text):
         return True
 
     for m in REGEX_FOREIGN_BOT.findall(text):
-        if m.lstrip('@').lower() != author_clean:
+        if m.lstrip('@').lower() not in author_tag.lower():
             return True
 
     if msg.buttons:
@@ -296,7 +314,7 @@ def is_ad(msg, author_clean: str) -> bool:
                     if "t.me/+" in u or "joinchat" in u:
                         return True
                     for bu in REGEX_FOREIGN_BOT.findall(u):
-                        if bu.lstrip('@').lower() != author_clean:
+                        if bu.lstrip('@').lower() not in author_tag.lower():
                             return True
 
     if msg.entities:
@@ -314,7 +332,7 @@ def is_ad(msg, author_clean: str) -> bool:
 
     return False
 
-def classify_bot_message(msg, author_clean: str) -> int | None:
+def classify_bot_message(msg, author_tag: str) -> int | None:
     text = (msg.raw_text or "").strip()
 
     # 1. Белый список (Исключения)
@@ -322,19 +340,19 @@ def classify_bot_message(msg, author_clean: str) -> int | None:
         if exc.lower() in text.lower():
             return None
 
-    # 2. SaluteSpeech (реплай) и Музыка MP3
-    if author_clean == "smartspeech_sber_bot" and msg.is_reply:
+    # 2. Полезный SaluteSpeech (реплай) и Музыка MP3
+    if "salute" in author_tag.lower() and msg.is_reply:
         return None
     if msg.audio:
         return None
 
-    # 3. Банворды с кастомным таймером
+    # 3. Банворды
     for b_word, b_delay in db_get_banwords():
         if b_word.lower() in text.lower():
             return b_delay
 
-    # 4. Чистая реклама -> 0 сек
-    if is_ad(msg, author_clean):
+    # 4. Реклама -> 0 сек
+    if is_ad(msg, author_tag):
         return 0
 
     # 5. Длинные сообщения / статьи Teletype / большие меню -> info_delay (30с)
@@ -345,19 +363,18 @@ def classify_bot_message(msg, author_clean: str) -> int | None:
     if is_long_text or has_large_buttons:
         return db_get_timer('info_delay', 30)
 
-    # 6. РП-команды и короткие ответы ботов -> rp_delay (10с)
+    # 6. РП-команды и короткие ответы (обнять, поцеловать, статус, реплики игр) -> rp_delay (10с)
     return db_get_timer('rp_delay', 10)
 
-def extract_pattern(msg, author_clean: str) -> str:
+def extract_pattern(msg, author_tag: str) -> str:
     text = (msg.raw_text or "").strip()
-
     m_inv = re.search(r"(https?://)?t\.me/(\+[a-zA-Z0-9_\-]+)", text)
     if m_inv:
         return re.escape(m_inv.group(0))
 
     mentions = REGEX_FOREIGN_BOT.findall(text)
     for m in mentions:
-        if m.lstrip('@').lower() != author_clean:
+        if m.lstrip('@').lower() not in author_tag.lower():
             return rf"{re.escape(m)}\b"
 
     if msg.buttons:
@@ -387,7 +404,7 @@ async def delete_after(event, delay: int, label: str):
         if delay > 0:
             await asyncio.sleep(delay)
         await event.delete()
-        logging.info(f"🗑 [Удалено: {delay}с] {label}")
+        logging.info(f"🗑 [Успешно удалено: {delay}с] {label}")
     except Exception as e:
         logging.warning(f"Ошибка удаления: {e}")
 
@@ -395,65 +412,78 @@ async def delete_after(event, delay: int, label: str):
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
 async def main_handler(event):
     msg = event.message
-    sender = await event.get_sender()
-    if not sender:
-        return
-
-    is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
-    sender_username = (getattr(sender, 'username', '') or '').lower()
     text = (msg.raw_text or "").strip()
 
+    # Получаем отправителя с защитой от пустых кэшей
+    sender = None
+    try:
+        sender = await event.get_sender()
+    except Exception:
+        pass
+
+    if not sender and event.sender_id:
+        try:
+            sender = await client.get_entity(event.sender_id)
+        except Exception:
+            pass
+
+    sender_username = (getattr(sender, 'username', '') or '').lower()
     if sender_username == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo"):
         return
 
-    # 1. ОБРАБОТКА ЧЕЛОВЕКА (Регексы команд)
+    is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
+
+    # 1. СООБЩЕНИЯ ОТ ЛЮДЕЙ (Регексы)
     if not is_bot:
         for pattern, delay in db_get_human_regex():
             try:
                 if re.match(pattern, text, re.IGNORECASE):
-                    logging.info(f"🚨 [Человек] Регекс '{pattern}' -> Снос через {delay}с")
+                    logging.info(f"🚨 [Человек] Регекс '{pattern}' -> Удаление через {delay}с")
                     asyncio.create_task(delete_after(event, delay, f"Human reg: {pattern}"))
                     return
             except re.error:
                 pass
         return
 
-    # 2. ОБРАБОТКА БОТА
-    if sender_username not in TRACKED_BOTS:
-        return
+    # 2. СООБЩЕНИЯ ОТ БОТОВ
+    is_tracked, bot_tag = identify_tracked_bot(sender)
+    if not is_tracked:
+        return  # Не наш бот — пропускаем
 
-    delay = classify_bot_message(msg, sender_username)
+    # Логируем появление бота для прозрачности
+    logging.info(f"🤖 Сообщение от бота [{bot_tag}]: '{text[:35].replace(chr(10), ' ')}...'")
+
+    delay = classify_bot_message(msg, bot_tag)
 
     if delay is None:
-        logging.info(f"🛡️ [@{sender_username}] Сообщение сохранено навсегда.")
+        logging.info(f"🛡️ [{bot_tag}] Сообщение с вечным иммунитетом.")
         return
 
     if delay == 0:
-        logging.info(f"💥 [@{sender_username}] СПАМ/БАНВОРД -> Мгновенный снос (0с)")
-        asyncio.create_task(delete_after(event, 0, f"Реклама @{sender_username}"))
+        logging.info(f"💥 [{bot_tag}] РЕКЛАМА/БАНВОРД -> Мгновенный снос (0с)")
+        asyncio.create_task(delete_after(event, 0, f"Реклама [{bot_tag}]"))
     elif delay <= 15:
-        logging.info(f"🎭 [@{sender_username}] РП / действие -> Удаление через {delay}с")
-        asyncio.create_task(delete_after(event, delay, f"РП @{sender_username}"))
+        logging.info(f"🎭 [{bot_tag}] РП / действие -> Удаление через {delay}с")
+        asyncio.create_task(delete_after(event, delay, f"РП [{bot_tag}]"))
     else:
-        logging.info(f"📋 [@{sender_username}] Инфо / меню / топ -> Удаление через {delay}с")
-        asyncio.create_task(delete_after(event, delay, f"Инфо @{sender_username}"))
+        logging.info(f"📋 [{bot_tag}] Инфо / меню / топ -> Удаление через {delay}с")
+        asyncio.create_task(delete_after(event, delay, f"Инфо [{bot_tag}]"))
 
 # --- ОБРАБОТЧИК SUDO КОМАНД ---
 @client.on(events.NewMessage(pattern=r"^sudo(\s.*|$)"))
 async def sudo_handler(event):
     if not await is_authorized(event):
-        return  # Игнорируем неавторизованных пользователей
+        return
 
     parts = event.raw_text.split()
     cmd = parts[1].lower() if len(parts) > 1 else ""
     val = " ".join(parts[2:]) if len(parts) > 2 else ""
 
-    # МЕНЮ ПОМОЩИ
     if not cmd:
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v3.5 — Панель управления**\n\n"
+            "🎯 **Sniper Userbot v3.6 — Панель управления**\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
@@ -466,7 +496,7 @@ async def sudo_handler(event):
             "• `sudo +рег {паттерн} [сек=5]` — Добавить регекс\n"
             "• `sudo -рег {паттерн}` / `sudo регексы` — Удалить / Список\n\n"
             "👥 **Доверенные пользователи:**\n"
-            "• `sudo +дов` *(реплай/@user/ID)* — Добавить доступ к sudo\n"
+            "• `sudo +дов` *(реплай/@user/ID)* — Дать доступ к sudo\n"
             "• `sudo -дов` *(реплай/@user/ID)* — Забрать доступ\n"
             "• `sudo доверенные` — Список доверенных\n\n"
             "⏱️ **Таймеры:**\n"
@@ -476,19 +506,19 @@ async def sudo_handler(event):
         return await event.reply(help_text)
 
     try:
-        # 1. СПАМ / ОБУЧЕНИЕ В РЕПЛАЙ
+        # 1. СПАМ
         if cmd in ["спам", "ad", "реклама", "бан"]:
             if not event.is_reply:
                 return await event.reply("⚠️ Ответь командой `sudo спам` **на сообщение с рекламой**.")
             target = await event.get_reply_message()
             t_sender = await target.get_sender()
-            t_user = getattr(t_sender, 'username', '') or 'bot'
+            _, b_tag = identify_tracked_bot(t_sender)
 
-            pat = extract_pattern(target, t_user.lower())
+            pat = extract_pattern(target, b_tag or "bot")
             db_add_ad(pat)
             await target.delete()
             await event.delete()
-            c = await event.respond(f"🎯 **Реклама ликвидирована!** Сигнатура сохранена:\n`{pat}`")
+            c = await event.respond(f"🎯 **Реклама уничтожена!** Паттерн:\n`{pat}`")
             await asyncio.sleep(4)
             await c.delete()
 
@@ -501,7 +531,7 @@ async def sudo_handler(event):
             if not val:
                 return await event.reply("❌ Укажи слово: `sudo +искл {слово}`")
             db_add_exception(val)
-            await event.reply(f"🛡️ Слово `{val}` добавлено в исключения (Вечный иммунитет).")
+            await event.reply(f"🛡️ Слово `{val}` добавлено в белый список (Вечный иммунитет).")
 
         elif cmd in ["-искл", "-exc"] and val:
             if db_del_exception(val): await event.reply(f"🗑 Исключение `{val}` удалено.")
@@ -517,7 +547,7 @@ async def sudo_handler(event):
             word = sp[0]
             delay = int(sp[1]) if len(sp) > 1 and sp[1].isdigit() else 0
             db_add_banword(word, delay)
-            await event.reply(f"🚫 Банворд `{word}` добавлен (снос через **{delay}с**).")
+            await event.reply(f"🚫 Банворд `{word}` добавлен (таймер: **{delay}с**).")
 
         elif cmd in ["-бан", "-ban"] and val:
             if db_del_banword(val): await event.reply(f"🗑 Банворд `{val}` удален.")
@@ -527,13 +557,13 @@ async def sudo_handler(event):
             items = db_get_banwords()
             await event.reply("🚫 **Список банвордов:**\n" + ("\n".join([f"• `{w}` ({d}с)" for w, d in items]) if items else "Пусто."))
 
-        # 4. РЕГЕКСЫ ДЛЯ ЛЮДЕЙ
+        # 4. РЕГЕКСЫ
         elif cmd in ["+рег", "+reg"] and val:
             sp = val.split()
             pat = sp[0]
             delay = int(sp[1]) if len(sp) > 1 and sp[1].isdigit() else 5
             db_add_human_regex(pat, delay)
-            await event.reply(f"🧹 Регекс `{pat}` добавлен (таймаут: **{delay}с**).")
+            await event.reply(f"🧹 Регекс `{pat}` добавлен (таймер: **{delay}с**).")
 
         elif cmd in ["-рег", "-reg"] and val:
             if db_del_human_regex(val): await event.reply(f"🗑 Регекс `{val}` удален.")
@@ -543,7 +573,7 @@ async def sudo_handler(event):
             items = db_get_human_regex()
             await event.reply("🧹 **Регексы людей:**\n" + ("\n".join([f"• `{p}` ({d}с)" for p, d in items]) if items else "Пусто."))
 
-        # 5. ДОВЕРЕННЫЕ ПОЛЬЗОВАТЕЛИ
+        # 5. ДОВЕРЕННЫЕ
         elif cmd in ["+дов", "+trust"]:
             target_user = None
             if event.is_reply:
@@ -580,14 +610,14 @@ async def sudo_handler(event):
             if uid and db_del_trusted(uid):
                 await event.reply(f"🗑 Пользователь `{uid}` удален из доверенных.")
             else:
-                await event.reply("❌ Пользователь не найден в списке доверенных.")
+                await event.reply("❌ Пользователь не найден.")
 
         elif cmd in ["доверенные", "дов", "trusted"]:
             items = db_get_trusted()
-            text = "👥 **Доверенные пользователи (доступ к sudo):**\n\n"
+            text = "👥 **Доверенные пользователи:**\n\n"
             for uid, uname in items:
                 text += f"• {uname} (`{uid}`)\n"
-            await event.reply(text if items else "Список доверенных пуст (работают только создатель и админы чата).")
+            await event.reply(text if items else "Список доверенных пуст (работают владелец и админы группы).")
 
         # 6. ТАЙМЕРЫ
         elif cmd in ["рп", "rp"] and val.isdigit():
@@ -600,7 +630,7 @@ async def sudo_handler(event):
 
         # 7. ЛОГИ
         elif cmd in ["лог", "log", "logs"]:
-            logs = mem_logs.get_logs(15)
+            logs = mem_logs.get_logs(18)
             text = "\n".join(logs) if logs else "Логи пусты."
             await event.reply(f"📜 **Последние события:**\n\n```text\n{text}\n```")
 
@@ -610,12 +640,12 @@ async def sudo_handler(event):
 # --- СТАРТ ---
 async def main():
     if not all([API_ID, API_HASH, SESSION_STRING]):
-        logging.critical("ОШИБКА: Заполните переменные API_ID, API_HASH, SESSION_STRING!")
+        logging.critical("ОШИБКА: Заполните переменные окружения API_ID, API_HASH, SESSION_STRING!")
         return
     init_db()
     await client.start()
     me = await client.get_me()
-    logging.info(f"Sniper v3.5 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v3.6 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
