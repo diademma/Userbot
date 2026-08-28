@@ -2,24 +2,25 @@ name: LEX Sniper Userbot
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Автоматический перезапуск каждые 30 минут
-  workflow_dispatch: # Возможность запустить вручную одной кнопкой
+    - cron: '0 */4 * * *' # Резервный запуск каждые 4 часа
+  workflow_dispatch:
 
 concurrency:
   group: telegram-userbot
-  cancel-in-progress: true # УБИВАЕТ старого бота перед запуском нового (защита от бана сессии)
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Разрешает боту пушить измененную базу данных обратно в репозиторий
+      contents: write
+      actions: write # Дает право воркфлоу перезапускать самого себя
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: true # Важно для корректного пуша БД
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,9 +32,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install telethon
 
-      - name: Run Userbot
+      - name: Run Userbot with Auto-Relay
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           SESSION_STRING: ${{ secrets.SESSION_STRING }}
-        run: python app.py
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Запуск бота с ограничением по времени 5 часов 40 минут (20400 сек)
+          # Это защищает от принудительного убийства гитхабом на 6 часах
+          timeout 20400s python app.py || true
+
+          echo "⏳ Время смены караула (5ч 40м вышло). Запускаем следующий цикл..."
+          gh workflow run "LEX Sniper Userbot" --ref main
