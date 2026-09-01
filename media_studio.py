@@ -1,4 +1,4 @@
-# media_studio.py — Высокоточный мультимедиа комбайн v2.2
+# media_studio.py — Высокоточный мультимедиа комбайн v2.3
 import os
 import re
 import shutil
@@ -26,7 +26,7 @@ TARGET_CHAT_ID = -1002281822286
 DAILY_LIMIT = 3
 DB_NAME = "sniper_memory_v3.db"
 
-# Ожидание обложек: {(chat_id, user_id): audio_message}
+# Словарь ожидания обложек: {(chat_id, user_id): audio_message}
 COVER_WAITING = {}
 
 def get_ffmpeg_bin() -> str:
@@ -100,7 +100,7 @@ def parse_time_range(val: str) -> tuple[str, str] | None:
         return None
     return m.group(1), m.group(2)
 
-# --- АДАПТИВНЫЕ МЕНЮ БЕЗ ПЕРЕНОСОВ ---
+# --- АДАПТИВНЫЕ МЕНЮ ---
 MENUS = {
     "main": (
         "🎛️ **MEDIA STUDIO**\n"
@@ -109,7 +109,7 @@ MENUS = {
         "🎵 `sudo медиа аудио`\n"
         "└ Питч, бас, реверб, гс, обрезка, обложка\n\n"
         "📹 `sudo медиа видео`\n"
-        "└ Кружки, нарезка, стрип звука, GIF\n\n"
+        "└ Кружки, круглые стикеры, GIF\n\n"
         "🖼️ `sudo медиа фото`\n"
         "└ Удаление фона, форматы, стикеры\n\n"
         "📄 `sudo медиа файлы`\n"
@@ -132,6 +132,7 @@ MENUS = {
     "video": (
         "📹 **VIDEO STUDIO**\n"
         "──────────────\n\n"
+        "• `.cstick` / `.кругстик` — Круглый стикер (без фона)\n"
         "• `.round` / `.круг` — Видео в кружок 1:1\n"
         "• `.unround` — Кружок обратно в видео MP4\n"
         "• `.vcut [00:00-00:00]` — Обрезка видео\n"
@@ -267,7 +268,7 @@ def register_media_studio(client, is_authorized_cb=None):
         commands_list = {
             ".pitch", ".bass", ".reverb", ".slow", ".cut", ".voice", ".гс", ".norm", ".cover",
             ".round", ".круг", ".unround", ".vcut", ".mute", ".audio", ".gif", ".webm",
-            ".rmbg", ".to", ".sticker", ".ext", ".clean"
+            ".cstick", ".кругстик", ".rmbg", ".to", ".sticker", ".ext", ".clean"
         }
         if cmd not in commands_list:
             return
@@ -368,7 +369,38 @@ def register_media_studio(client, is_authorized_cb=None):
                     out_file = out_file.with_suffix(".mp3")
                     ok = await run_ffmpeg(["-i", str(in_file), "-vn", "-q:a", "2", str(out_file)])
 
-                # 🎬 ЖИВОЙ ВИДЕОСТИКЕР WEBM
+                # ⭕ КРУГЛЫЙ ВИДЕОСТИКЕР С ПРОЗРАЧНЫМИ УГЛАМИ
+                elif cmd in (".cstick", ".кругстик"):
+                    out_file = out_file.with_suffix(".webm")
+                    times = parse_time_range(args) if args else None
+                    time_flags = ["-ss", times[0], "-to", times[1]] if times else ["-t", "3"]
+
+                    vf = (
+                        "crop='min(iw,ih)':'min(iw,ih)',scale=512:512,"
+                        "format=yuva420p,"
+                        "geq=lum='p(X,Y)':a='if(lte(hypot(X-256\,Y-256)\,254)\,255\,if(lte(hypot(X-256\,Y-256)\,256)\,(256-hypot(X-256\,Y-256))*127.5\,0))'"
+                    )
+
+                    ok = await run_ffmpeg([
+                        *time_flags,
+                        "-i", str(in_file),
+                        "-r", "30",
+                        "-vf", vf,
+                        "-c:v", "libvpx-vp9",
+                        "-crf", "32",
+                        "-b:v", "256k",
+                        "-an",
+                        "-fs", "256K",
+                        str(out_file)
+                    ])
+                    mime_type = "video/webm"
+                    custom_attributes = [
+                        DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty()),
+                        DocumentAttributeVideo(duration=3, w=512, h=512),
+                        DocumentAttributeImageSize(w=512, h=512)
+                    ]
+
+                # 🎬 ОБЫЧНЫЙ ВИДЕОСТИКЕР WEBM
                 elif cmd == ".webm":
                     out_file = out_file.with_suffix(".webm")
                     vf = "scale=512:512:force_original_aspect_ratio=decrease"
@@ -448,7 +480,7 @@ def register_media_studio(client, is_authorized_cb=None):
                 if not ok or not out_file.exists():
                     return await status.edit("❌ Ошибка FFmpeg при обработке.")
 
-                # Отправка интерактивного стикера / видео / файла
+                # Отправка результата
                 await event.client.send_file(
                     event.chat_id,
                     file=str(out_file),
