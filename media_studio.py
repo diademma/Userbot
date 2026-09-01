@@ -1,4 +1,4 @@
-# media_studio.py — Высокоточный мультимедиа комбайн v2.0
+# media_studio.py — Высокоточный мультимедиа комбайн v2.1
 import os
 import re
 import shutil
@@ -9,7 +9,12 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from telethon import events
-from telethon.tl.types import DocumentAttributeAudio
+from telethon.tl.types import (
+    DocumentAttributeAudio,
+    DocumentAttributeVideo,
+    DocumentAttributeSticker,
+    InputStickerSetEmpty
+)
 
 LOGGER = logging.getLogger("MediaStudio")
 
@@ -51,7 +56,6 @@ def init_media_db():
     conn.close()
 
 def check_and_inc_limit(user_id: int) -> tuple[bool, int]:
-    """Проверяет дневной лимит (3/день). Возвращает (разрешено, осталось_попыток)"""
     today = datetime.now().strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -94,11 +98,11 @@ def parse_time_range(val: str) -> tuple[str, str] | None:
         return None
     return m.group(1), m.group(2)
 
-# --- КРАСИВЫЕ ТЕКСТОВЫЕ МЕНЮ ---
+# --- АДАПТИВНЫЕ МЕНЮ БЕЗ ПЕРЕНОСА СТРОК ---
 MENUS = {
     "main": (
         "🎛️ **MEDIA STUDIO**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "──────────────\n\n"
         "📂 **Разделы студии:**\n\n"
         "🎵 `sudo медиа аудио`\n"
         "└ Питч, бас, реверб, гс, обрезка, обложка\n\n"
@@ -108,12 +112,12 @@ MENUS = {
         "└ Удаление фона, форматы, стикеры\n\n"
         "📄 `sudo медиа файлы`\n"
         "└ Смена расширений, очистка EXIF\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
+        "──────────────\n"
         "💡 *Ответьте командой на медиа для обработки.*"
     ),
     "audio": (
         "🎵 **AUDIO STUDIO**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "──────────────\n\n"
         "• `.pitch [-10..+10]` — Плавный Stellio-питч\n"
         "• `.bass [1..10]` — Ступенчатый сабвуфер\n"
         "• `.reverb` — Объёмное концертное эхо\n"
@@ -125,17 +129,18 @@ MENUS = {
     ),
     "video": (
         "📹 **VIDEO STUDIO**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "──────────────\n\n"
         "• `.round` / `.круг` — Видео в кружок 1:1\n"
         "• `.unround` — Кружок обратно в видео MP4\n"
         "• `.vcut [00:00-00:00]` — Обрезка видео\n"
         "• `.mute` — Удалить звуковую дорожку\n"
         "• `.audio` — Извлечь чистый MP3\n"
-        "• `.gif` / `.webm` — В анимацию или стикер"
+        "• `.webm` — В официальный видеостикер\n"
+        "• `.gif` — В плавную зацикленную GIF"
     ),
     "photo": (
         "🖼️ **PHOTO & STICKERS**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "──────────────\n\n"
         "• `.rmbg black` — Срезать черный фон (PNG)\n"
         "• `.rmbg white` — Срезать белый фон (PNG)\n"
         "• `.to [png|jpg|webp|pdf|ico]` — Конвертация\n"
@@ -143,7 +148,7 @@ MENUS = {
     ),
     "files": (
         "📄 **FILES & METADATA**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "──────────────\n\n"
         "• `.ext [расширение]` — Смена типа файла\n"
         "• `.clean` — Полная очистка метаданных"
     )
@@ -158,19 +163,17 @@ def register_media_studio(client, is_authorized_cb=None):
         if not sid:
             return False, "Неизвестный отправитель."
 
-        # Безлимит для Владельца, Бота и Sudo
         if sid in (OWNER_ID, LEX_BOT_ID):
             return True, "unlimited"
         if is_authorized_cb and await is_authorized_cb(event):
             return True, "unlimited"
 
-        # Проверка целевого чата
         if cid == TARGET_CHAT_ID:
             if consume_quota:
                 allowed, left = check_and_inc_limit(sid)
                 if not allowed:
-                    return False, f"⚠️ Достигнут лимит: **{DAILY_LIMIT}/{DAILY_LIMIT}** операций в день. Приходите завтра!"
-                return True, f"Осталось операций на сегодня: **{left}**"
+                    return False, f"⚠️ Достигнут лимит: **{DAILY_LIMIT}/{DAILY_LIMIT}** операций в день."
+                return True, f"Осталось операций: **{left}**"
             return True, "ok"
 
         return False, "Доступ ограничен."
@@ -191,7 +194,7 @@ def register_media_studio(client, is_authorized_cb=None):
         text = MENUS.get(mapping.get(section, "main"), MENUS["main"])
         await event.reply(text)
 
-    # --- ИНТЕРАКТИВНЫЙ ХЭНДЛЕР СМЕНЫ ОБЛОЖКИ ---
+    # --- ИНТЕРАКТИВНАЯ СМЕНА ОБЛОЖКИ ---
     @client.on(events.NewMessage(func=lambda e: (e.chat_id, e.sender_id) in COVER_WAITING))
     async def cover_catcher_handler(event):
         key = (event.chat_id, event.sender_id)
@@ -199,8 +202,7 @@ def register_media_studio(client, is_authorized_cb=None):
         if not audio_msg:
             return
 
-        # Проверяем, является ли сообщение картинкой или стикером
-        is_valid_image = bool(event.photo or (event.document and "image" in (event.document.mime_type or "")) or (event.sticker))
+        is_valid_image = bool(event.photo or (event.document and "image" in (event.document.mime_type or "")) or event.sticker)
         if not is_valid_image:
             return await event.reply("❌ Операция отменена: ожидалось изображение или стикер.")
 
@@ -217,14 +219,12 @@ def register_media_studio(client, is_authorized_cb=None):
             clean_cover = tmp_path / "cover.jpg"
             out_track = tmp_path / "track_out.mp3"
 
-            # 1. Приводим картинку к квадратному JPEG
             ok_img = await run_ffmpeg([
                 "-i", str(raw_cover),
                 "-vf", "scale='if(gt(iw,ih),600,-1)':'if(gt(iw,ih),-1,600)'",
                 "-q:v", "2", str(clean_cover)
             ])
 
-            # 2. Вшиваем в аудио
             ok_audio = await run_ffmpeg([
                 "-i", str(raw_audio),
                 "-i", str(clean_cover),
@@ -240,7 +240,6 @@ def register_media_studio(client, is_authorized_cb=None):
             if not (ok_img and ok_audio) or not out_track.exists():
                 return await status.edit("❌ Ошибка FFmpeg при сборке трека.")
 
-            # Сохраняем имя исполнителя и название трека
             title, performer = "Track", "Artist"
             if audio_msg.file and audio_msg.file.name:
                 title = Path(audio_msg.file.name).stem
@@ -279,7 +278,6 @@ def register_media_studio(client, is_authorized_cb=None):
         if not reply_msg or not reply_msg.media:
             return await event.reply("⚠️ Ответьте командой на медиафайл.")
 
-        # Режим смены обложки
         if cmd == ".cover":
             if not reply_msg.audio and not (reply_msg.document and "audio" in (reply_msg.document.mime_type or "")):
                 return await event.reply("⚠️ Команда `.cover` работает только в ответ на аудиофайл!")
@@ -299,9 +297,11 @@ def register_media_studio(client, is_authorized_cb=None):
             as_voice = False
             as_video_note = False
             force_document = False
+            mime_type = None
+            custom_attributes = []
 
             try:
-                # 🎵 АУДИО (Плавный Stellio-питч и 10-бальный басс)
+                # 🎵 АУДИО
                 if cmd == ".pitch":
                     step = int(args) if args.lstrip('-+').isdigit() else 0
                     step = max(min(step, 10), -10)
@@ -366,12 +366,33 @@ def register_media_studio(client, is_authorized_cb=None):
                     out_file = out_file.with_suffix(".mp3")
                     ok = await run_ffmpeg(["-i", str(in_file), "-vn", "-q:a", "2", str(out_file)])
 
-                elif cmd in (".gif", ".webm"):
-                    out_file = out_file.with_suffix(".gif" if cmd == ".gif" else ".webm")
-                    vf = "fps=15,scale=480:-1:flags=lanczos"
-                    ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, str(out_file)])
+                # 🎬 ОФИЦИАЛЬНЫЙ ВИДЕОСТИКЕР WEBM
+                elif cmd == ".webm":
+                    out_file = out_file.with_suffix(".webm")
+                    vf = "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'"
+                    ok = await run_ffmpeg([
+                        "-i", str(in_file),
+                        "-t", "3",
+                        "-r", "30",
+                        "-vf", vf,
+                        "-c:v", "libvpx-vp9",
+                        "-crf", "30",
+                        "-b:v", "256k",
+                        "-pix_fmt", "yuva420p",
+                        "-an",
+                        str(out_file)
+                    ])
+                    mime_type = "image/webm"
+                    custom_attributes = [DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty())]
 
-                # 🖼️ ФОТО / ГРАФИКА
+                # 🎞️ GIF АНИМАЦИЯ
+                elif cmd == ".gif":
+                    out_file = out_file.with_suffix(".mp4")
+                    vf = "fps=20,scale=480:-1:flags=lanczos"
+                    ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-an", str(out_file)])
+                    custom_attributes = [DocumentAttributeVideo(0, 0, 0, supports_streaming=True)]
+
+                # 🖼️ ФОТО / СТИКЕРЫ
                 elif cmd == ".rmbg":
                     color = "0xFFFFFF" if args.lower() == "white" else "0x000000"
                     out_file = out_file.with_suffix(".png")
@@ -388,6 +409,8 @@ def register_media_studio(client, is_authorized_cb=None):
                     out_file = out_file.with_suffix(".webp")
                     vf = "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'"
                     ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, str(out_file)])
+                    mime_type = "image/webp"
+                    custom_attributes = [DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty())]
 
                 # 📄 ФАЙЛЫ
                 elif cmd == ".ext":
@@ -411,14 +434,16 @@ def register_media_studio(client, is_authorized_cb=None):
                 if not ok or not out_file.exists():
                     return await status.edit("❌ Ошибка FFmpeg при обработке.")
 
-                # Отправка результата в чат
+                # Отправка с правильными Telegram-атрибутами
                 await event.client.send_file(
                     event.chat_id,
                     file=str(out_file),
                     reply_to=reply_msg.id,
                     voice_note=as_voice,
                     video_note=as_video_note,
-                    force_document=force_document
+                    force_document=force_document,
+                    mime_type=mime_type,
+                    attributes=custom_attributes if custom_attributes else None
                 )
                 await status.delete()
 
