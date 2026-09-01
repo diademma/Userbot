@@ -1,32 +1,36 @@
 # media_studio.py — Независимый мультимедиа комбайн для Telethon
 import os
 import re
-import math
 import shutil
 import asyncio
 import logging
 import tempfile
 from pathlib import Path
 from telethon import events
-from telethon.tl.types import (
-    DocumentAttributeAudio,
-    DocumentAttributeVideo,
-    DocumentAttributeFilename
-)
 
 LOGGER = logging.getLogger("MediaStudio")
 LEX_BOT_ID = 8617655235
-LEX_BOT_USERNAME = "my_LEX_superbot"
 OWNER_ID = 5421909121
 
-# Ограничение параллельных тяжелых задач FFmpeg на раннере GitHub
+# Автоопределение пути к FFmpeg (системный или из imageio-ffmpeg)
+def get_ffmpeg_bin() -> str:
+    bin_path = shutil.which("ffmpeg")
+    if bin_path:
+        return bin_path
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        return "ffmpeg"
+
+FFMPEG_BIN = get_ffmpeg_bin()
 SEMAPHORE = asyncio.Semaphore(2)
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 async def run_ffmpeg(cmd: list[str], timeout: int = 180) -> bool:
     async with SEMAPHORE:
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-y", *cmd,
+            FFMPEG_BIN, "-hide_banner", "-y", *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -48,59 +52,53 @@ def parse_time_range(val: str) -> tuple[str, str] | None:
         return None
     return m.group(1), m.group(2)
 
-# --- ШАБЛОНЫ МЕНЮ С ДИПЛИНКАМИ ---
+# --- ТЕКСТОВЫЕ МЕНЮ БЕЗ ДИПЛИНКОВ ---
 MENUS = {
     "main": (
         "🎛️ **𝗠𝗘𝗗𝗜𝗔 𝗦𝗧𝗨𝗗𝗜𝗢**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Выберите раздел для работы с медиа:\n\n"
-        f"[ 🎵 Аудио студия ](https://t.me/{LEX_BOT_USERNAME}?start=help_audio)  •  "
-        f"[ 📹 Видео студия ](https://t.me/{LEX_BOT_USERNAME}?start=help_video)\n"
-        f"[ 🖼️ Фото и Фон ](https://t.me/{LEX_BOT_USERNAME}?start=help_photo)  •  "
-        f"[ 📄 Файлы и Мета ](https://t.me/{LEX_BOT_USERNAME}?start=help_files)\n\n"
+        "Разделы управления медиа:\n\n"
+        "• 🎵 `sudo медиа аудио` — Тон, бас, реверб, гс, обрезка\n"
+        "• 📹 `sudo медиа видео` — Кружки, стрип звука, нарезка\n"
+        "• 🖼️ `sudo медиа фото`  — Удаление фона, стикеры, форматы\n"
+        "• 📄 `sudo медиа файлы` — Смена расширений, очистка EXIF\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 Быстрый вызов: `sudo медиа [аудио | видео | фото | файлы]`"
+        "💡 Все команды применяются в ответ на сообщение с медиа."
     ),
     "audio": (
-        "🎵 **𝗔𝗨𝗗𝗜𝗢 𝗦𝗧𝗨𝗗𝗜𝗢**\n"
+        "🎵 **АУДИО СТУДИЯ**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "• `.pitch [-10..+10]` — Тон + скорость (полутона)\n"
+        "• `.pitch [-10..+10]` — Тон + скорость (напр. `.pitch +3`)\n"
         "• `.bass [100/200/300/666]` — Усиление баса\n"
-        "• `.reverb` — Пространственный реверб\n"
-        "• `.slow` — Slowed + Reverb\n"
+        "• `.reverb` — Пространственное эхо\n"
+        "• `.slow` — Замедление + реверб (Slowed)\n"
         "• `.cut [старт-конец]` — Обрезка (`.cut 00:15-01:30`)\n"
         "• `.voice` / `.гс` — Перевод в Voice Note (Opus)\n"
-        "• `.norm` — Мастеринг громкости (EBU R128)\n"
-        "• `.tag \"Артист\" \"Трек\"` — Смена ID3 тегов\n"
-        "• `.cover` — Вшить обложку из реплая\n\n"
-        f"[ ⬅️ Главное меню ](https://t.me/{LEX_BOT_USERNAME}?start=help_main)"
+        "• `.norm` — Мастеринг громкости (EBU R128)"
     ),
     "video": (
-        "📹 **𝗩𝗜𝗗𝗘𝗢 𝗦𝗧𝗨𝗗𝗜𝗢**\n"
+        "📹 **ВИДЕО СТУДИЯ**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "• `.round` / `.круг` — Видео в видео-кружок 1:1\n"
-        "• `.unround` — Кружок обратно в видео\n"
+        "• `.round` / `.круг` — Видео в кружок 1:1 (Video Note)\n"
+        "• `.unround` — Кружок обратно в видео MP4\n"
         "• `.vcut [старт-конец]` — Обрезка (`.vcut 00:05-00:45`)\n"
         "• `.mute` — Удалить звуковую дорожку\n"
-        "• `.audio` — Извлечь звук в MP3\n"
-        "• `.gif` / `.webm` — В GIF / WebM видеостикер\n\n"
-        f"[ ⬅️ Главное меню ](https://t.me/{LEX_BOT_USERNAME}?start=help_main)"
+        "• `.audio` — Извлечь чистое аудио в MP3\n"
+        "• `.gif` / `.webm` — В GIF или стикер-видео"
     ),
     "photo": (
-        "🖼️ **𝗣𝗛𝗢𝗧𝗢 & 𝗦𝗧𝗜𝗖𝗞𝗘𝗥𝗦**\n"
+        "🖼️ **ФОТО И СТИКЕРЫ**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "• `.rmbg black` — Удалить черный фон (в PNG)\n"
         "• `.rmbg white` — Удалить белый фон (в PNG)\n"
         "• `.to [png|jpg|webp|pdf|ico|tif]` — Конвертация\n"
-        "• `.sticker` — Картинку в WebP стикер\n\n"
-        f"[ ⬅️ Главное меню ](https://t.me/{LEX_BOT_USERNAME}?start=help_main)"
+        "• `.sticker` — Картинку в WebP стикер"
     ),
     "files": (
-        "📄 **𝗙𝗜𝗟𝗘𝗦 & 𝗠𝗘𝗧𝗔𝗗𝗔𝗧𝗔**\n"
+        "📄 **ФАЙЛЫ И МЕТАДАННЫЕ**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "• `.ext [расширение]` — Сменить расширение (`.ext py`)\n"
-        "• `.clean` — Полная очистка метаданных и EXIF\n\n"
-        f"[ ⬅️ Главное меню ](https://t.me/{LEX_BOT_USERNAME}?start=help_main)"
+        "• `.clean` — Полная очистка метаданных и EXIF"
     )
 }
 
@@ -115,7 +113,7 @@ def register_media_studio(client, is_authorized_cb=None):
             return True
         return False
 
-    # --- ХЭНДЛЕР МЕНЮ SUDO МЕДИА ---
+    # Меню
     @client.on(events.NewMessage(pattern=r"^(?:sudo\s+)?(?:медиа|media)(?:\s+(.*))?$", func=lambda e: not e.is_private or e.sender_id in (OWNER_ID, LEX_BOT_ID)))
     async def media_menu_handler(event):
         if not await check_access(event):
@@ -128,9 +126,9 @@ def register_media_studio(client, is_authorized_cb=None):
             "файлы": "files", "files": "files", "мета": "files"
         }
         text = MENUS.get(mapping.get(section, "main"), MENUS["main"])
-        await event.reply(text, link_preview=False)
+        await event.reply(text)
 
-    # --- ХЭНДЛЕР ОБРАБОТКИ МЕДИА ---
+    # Обработка команд медиа
     @client.on(events.NewMessage(pattern=r"^(\.[a-zA-Zа-яА-Я0-9_-]+)(?:\s+(.*))?$"))
     async def media_process_handler(event):
         if not await check_access(event):
@@ -140,7 +138,7 @@ def register_media_studio(client, is_authorized_cb=None):
         args = (event.pattern_match.group(2) or "").strip()
 
         commands_list = {
-            ".pitch", ".bass", ".reverb", ".slow", ".cut", ".voice", ".гс", ".norm", ".tag", ".cover",
+            ".pitch", ".bass", ".reverb", ".slow", ".cut", ".voice", ".гс", ".norm",
             ".round", ".круг", ".unround", ".vcut", ".mute", ".audio", ".gif", ".webm",
             ".rmbg", ".to", ".sticker", ".ext", ".clean"
         }
@@ -157,17 +155,16 @@ def register_media_studio(client, is_authorized_cb=None):
             tmp_path = Path(tmp_dir)
             in_file = await reply_msg.download_media(file=tmp_path / "input")
             if not in_file:
-                return await status.edit("❌ Не удалось загрузить медиа.")
+                return await status.edit("❌ Не удалось скачать медиа.")
 
             in_file = Path(in_file)
             out_file = tmp_path / "output"
-            extra_attrs = []
             as_voice = False
             as_video_note = False
             force_document = False
 
             try:
-                # 🎵 АУДИО БЛОК
+                # 🎵 АУДИО
                 if cmd == ".pitch":
                     step = int(args) if args.lstrip('-+').isdigit() else 0
                     step = max(min(step, 10), -10)
@@ -192,9 +189,9 @@ def register_media_studio(client, is_authorized_cb=None):
                 elif cmd == ".cut":
                     times = parse_time_range(args)
                     if not times:
-                        return await status.edit("❌ Формат: `.cut 00:00-00:00` (например `.cut 00:15-01:30`)")
+                        return await status.edit("❌ Формат: `.cut 00:00-00:00` (напр. `.cut 00:15-01:30`)")
                     out_file = out_file.with_suffix(".mp3")
-                    ok = await run_ffmpeg(["-ss", times[0], "-to", times[1], "-i", str(in_file), "-c", "copy", str(out_file)])
+                    ok = await run_ffmpeg(["-ss", times[0], "-to", times[1], "-i", str(in_file), "-q:a", "2", str(out_file)])
 
                 elif cmd in (".voice", ".гс"):
                     out_file = out_file.with_suffix(".ogg")
@@ -205,7 +202,7 @@ def register_media_studio(client, is_authorized_cb=None):
                     out_file = out_file.with_suffix(".mp3")
                     ok = await run_ffmpeg(["-i", str(in_file), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-q:a", "2", str(out_file)])
 
-                # 📹 ВИДЕО БЛОК
+                # 📹 ВИДЕО
                 elif cmd in (".round", ".круг"):
                     out_file = out_file.with_suffix(".mp4")
                     vf = "crop='min(iw,ih)':'min(iw,ih)',scale=512:512,setsar=1"
@@ -219,7 +216,7 @@ def register_media_studio(client, is_authorized_cb=None):
                 elif cmd == ".vcut":
                     times = parse_time_range(args)
                     if not times:
-                        return await status.edit("❌ Формат: `.vcut 00:00-00:00` (например `.vcut 00:10-00:40`)")
+                        return await status.edit("❌ Формат: `.vcut 00:00-00:00` (напр. `.vcut 00:10-00:40`)")
                     out_file = out_file.with_suffix(".mp4")
                     ok = await run_ffmpeg(["-ss", times[0], "-to", times[1], "-i", str(in_file), "-c", "copy", str(out_file)])
 
@@ -238,8 +235,7 @@ def register_media_studio(client, is_authorized_cb=None):
 
                 # 🖼️ ФОТО / ГРАФИКА
                 elif cmd == ".rmbg":
-                    mode = args.lower()
-                    color = "0xFFFFFF" if mode == "white" else "0x000000"
+                    color = "0xFFFFFF" if args.lower() == "white" else "0x000000"
                     out_file = out_file.with_suffix(".png")
                     vf = f"colorkey={color}:0.18:0.1,format=rgba"
                     ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, str(out_file)])
@@ -255,11 +251,11 @@ def register_media_studio(client, is_authorized_cb=None):
                     vf = "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'"
                     ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, str(out_file)])
 
-                # 📄 ФАЙЛЫ И МЕТАДАННЫЕ
+                # 📄 ФАЙЛЫ
                 elif cmd == ".ext":
                     target_ext = args.strip().lstrip(".")
                     if not target_ext:
-                        return await status.edit("❌ Укажите расширение: `.ext py` / `.ext plugin`")
+                        return await status.edit("❌ Укажите расширение: `.ext py`")
                     out_file = out_file.with_suffix(f".{target_ext}")
                     shutil.copyfile(in_file, out_file)
                     force_document = True
@@ -275,9 +271,8 @@ def register_media_studio(client, is_authorized_cb=None):
                     return await status.delete()
 
                 if not ok or not out_file.exists():
-                    return await status.edit("❌ Ошибка обработки FFmpeg.")
+                    return await status.edit("❌ Ошибка FFmpeg при обработке.")
 
-                # Отправка результата в тот же контекст
                 await event.client.send_file(
                     event.chat_id,
                     file=str(out_file),
