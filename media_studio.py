@@ -1,4 +1,4 @@
-# media_studio.py — Высокоточный мультимедиа комбайн v2.1
+# media_studio.py — Высокоточный мультимедиа комбайн v2.2
 import os
 import re
 import shutil
@@ -13,6 +13,8 @@ from telethon.tl.types import (
     DocumentAttributeAudio,
     DocumentAttributeVideo,
     DocumentAttributeSticker,
+    DocumentAttributeImageSize,
+    DocumentAttributeAnimated,
     InputStickerSetEmpty
 )
 
@@ -98,7 +100,7 @@ def parse_time_range(val: str) -> tuple[str, str] | None:
         return None
     return m.group(1), m.group(2)
 
-# --- АДАПТИВНЫЕ МЕНЮ БЕЗ ПЕРЕНОСА СТРОК ---
+# --- АДАПТИВНЫЕ МЕНЮ БЕЗ ПЕРЕНОСОВ ---
 MENUS = {
     "main": (
         "🎛️ **MEDIA STUDIO**\n"
@@ -135,7 +137,7 @@ MENUS = {
         "• `.vcut [00:00-00:00]` — Обрезка видео\n"
         "• `.mute` — Удалить звуковую дорожку\n"
         "• `.audio` — Извлечь чистый MP3\n"
-        "• `.webm` — В официальный видеостикер\n"
+        "• `.webm` — В живой видеостикер\n"
         "• `.gif` — В плавную зацикленную GIF"
     ),
     "photo": (
@@ -366,31 +368,40 @@ def register_media_studio(client, is_authorized_cb=None):
                     out_file = out_file.with_suffix(".mp3")
                     ok = await run_ffmpeg(["-i", str(in_file), "-vn", "-q:a", "2", str(out_file)])
 
-                # 🎬 ОФИЦИАЛЬНЫЙ ВИДЕОСТИКЕР WEBM
+                # 🎬 ЖИВОЙ ВИДЕОСТИКЕР WEBM
                 elif cmd == ".webm":
                     out_file = out_file.with_suffix(".webm")
-                    vf = "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'"
+                    vf = "scale=512:512:force_original_aspect_ratio=decrease"
                     ok = await run_ffmpeg([
                         "-i", str(in_file),
                         "-t", "3",
                         "-r", "30",
                         "-vf", vf,
                         "-c:v", "libvpx-vp9",
-                        "-crf", "30",
+                        "-crf", "32",
                         "-b:v", "256k",
                         "-pix_fmt", "yuva420p",
                         "-an",
+                        "-fs", "256K",
                         str(out_file)
                     ])
-                    mime_type = "image/webm"
-                    custom_attributes = [DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty())]
+                    mime_type = "video/webm"
+                    custom_attributes = [
+                        DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty()),
+                        DocumentAttributeVideo(duration=3, w=512, h=512),
+                        DocumentAttributeImageSize(w=512, h=512)
+                    ]
 
                 # 🎞️ GIF АНИМАЦИЯ
                 elif cmd == ".gif":
                     out_file = out_file.with_suffix(".mp4")
                     vf = "fps=20,scale=480:-1:flags=lanczos"
                     ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-an", str(out_file)])
-                    custom_attributes = [DocumentAttributeVideo(0, 0, 0, supports_streaming=True)]
+                    mime_type = "video/mp4"
+                    custom_attributes = [
+                        DocumentAttributeAnimated(),
+                        DocumentAttributeVideo(duration=0, w=0, h=0, supports_streaming=True)
+                    ]
 
                 # 🖼️ ФОТО / СТИКЕРЫ
                 elif cmd == ".rmbg":
@@ -407,10 +418,13 @@ def register_media_studio(client, is_authorized_cb=None):
 
                 elif cmd == ".sticker":
                     out_file = out_file.with_suffix(".webp")
-                    vf = "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'"
+                    vf = "scale=512:512:force_original_aspect_ratio=decrease"
                     ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, str(out_file)])
                     mime_type = "image/webp"
-                    custom_attributes = [DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty())]
+                    custom_attributes = [
+                        DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty()),
+                        DocumentAttributeImageSize(w=512, h=512)
+                    ]
 
                 # 📄 ФАЙЛЫ
                 elif cmd == ".ext":
@@ -434,7 +448,7 @@ def register_media_studio(client, is_authorized_cb=None):
                 if not ok or not out_file.exists():
                     return await status.edit("❌ Ошибка FFmpeg при обработке.")
 
-                # Отправка с правильными Telegram-атрибутами
+                # Отправка интерактивного стикера / видео / файла
                 await event.client.send_file(
                     event.chat_id,
                     file=str(out_file),
