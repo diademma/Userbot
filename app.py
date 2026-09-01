@@ -1,4 +1,4 @@
-# CODEVER: v4.3 | Sniper Userbot (Dedicated Iris Pipeline, Anti-Spam & Multi-Word Heuristics)
+# CODEVER: v4.4 | Sniper Userbot + Media Studio (Fault-Tolerant Engine)
 import os
 import re
 import sys
@@ -10,6 +10,14 @@ from collections import deque
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User, MessageEntityTextUrl
+
+# --- БЕЗОПАСНЫЙ ИМПОРТ MEDIA STUDIO ---
+try:
+    from media_studio import register_media_studio
+    HAS_MEDIA_STUDIO = True
+except Exception as e:
+    HAS_MEDIA_STUDIO = False
+    logging.warning(f"⚠️ Media Studio не загружен (будет пропущен): {e}")
 
 # --- БУФЕР ЛОГОВ В ПАМЯТИ ---
 class MemoryLogHandler(logging.Handler):
@@ -64,7 +72,7 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v4.3 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v4.4 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
         logging.info("БД сохранена в GitHub.")
     except Exception as e:
@@ -311,11 +319,9 @@ REGEX_GIFT_TRAP = re.compile(r"(подарок|подарка|подарки|п�
 def is_ad(msg, author_tag: str, is_reply: bool) -> bool:
     text = (msg.raw_text or "") + " " + (msg.message or "")
 
-    # 1. Инвайт-ссылки
     if REGEX_INVITE.search(text):
         return True
 
-    # 2. Кнопки с URL ссылками в сообщениях БЕЗ реплая
     if msg.buttons:
         for row in msg.buttons:
             for btn in row:
@@ -330,24 +336,20 @@ def is_ad(msg, author_tag: str, is_reply: bool) -> bool:
                         if b_clean not in KNOWN_BOT_USERNAMES and b_clean not in author_tag.lower():
                             return True
 
-    # 3. Чужие боты
     for m in REGEX_FOREIGN_BOT.findall(text):
         bot_clean = m.lstrip('@').lower()
         if bot_clean not in KNOWN_BOT_USERNAMES and bot_clean not in author_tag.lower():
             return True
 
-    # 4. Скрытые ссылки
     if msg.entities:
         for ent in msg.entities:
             if isinstance(ent, MessageEntityTextUrl) and ent.url:
                 if not is_reply or REGEX_INVITE.search(ent.url):
                     return True
 
-    # 5. Спам-ловушки подарков
     if not is_reply and REGEX_GIFT_TRAP.search(text) and (msg.buttons or "👇" in text or "👉" in text):
         return True
 
-    # 6. Спам-паттерны
     for pat in db_get_ads():
         try:
             if re.search(pat, text, re.IGNORECASE):
@@ -364,21 +366,15 @@ def classify_bot_message(event, author_tag: str) -> int | None:
     tag_lower = author_tag.lower()
     is_reply = bool(event.is_reply or getattr(msg, 'reply_to_msg_id', None))
 
-    # =========================================================================
-    # ПРИОРИТЕТ 1: БЕЛЫЙ СПИСОК ИСКЛЮЧЕНИЙ (ДЛЯ ВСЕХ БОТОВ)
-    # =========================================================================
+    # ПРИОРИТЕТ 1: ИСКЛЮЧЕНИЯ
     for exc in db_get_exceptions():
         norm_exc = " ".join(exc.lower().split())
         if norm_exc in norm_text:
-            return None  # Вечный иммунитет
+            return None
 
-    # =========================================================================
-    # ПРИОРИТЕТ 2: ВЫДЕЛЕННЫЙ ПАЙПЛАЙН ДЛЯ ИРИСА (@iris_black_bot)
-    # (В Ирисе НЕТ рекламы — 0 секунд исключено!)
-    # =========================================================================
+    # ПРИОРИТЕТ 2: ИРИС
     is_iris = "iris" in tag_lower or "ирис" in tag_lower
     if is_iris:
-        # Проверяем: большое сообщение (ферма, мешок, статы) или короткое (РП)
         lines_count = len(text.split('\n'))
         has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
         is_long_text = len(text) > 250 or lines_count >= 5
@@ -387,9 +383,7 @@ def classify_bot_message(event, author_tag: str) -> int | None:
             return db_get_timer('info_delay', 30)
         return db_get_timer('rp_delay', 10)
 
-    # =========================================================================
-    # ПРИОРИТЕТ 3: АУДИО, МУЗЫКА И СБЕР (ВЕЧНЫЙ ИММУНИТЕТ)
-    # =========================================================================
+    # ПРИОРИТЕТ 3: АУДИО И СБЕР
     if "vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower:
         if msg.audio or is_reply or getattr(msg, 'via_bot_id', None) or "via @" in text.lower():
             return None
@@ -400,23 +394,17 @@ def classify_bot_message(event, author_tag: str) -> int | None:
     if "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
         return None
 
-    # =========================================================================
-    # ПРИОРИТЕТ 4: ЧИСТАЯ РЕКЛАМА ОТ ОСТАЛЬНЫХ БОТОВ (Снос 0 сек)
-    # =========================================================================
+    # ПРИОРИТЕТ 4: РЕКЛАМА
     if is_ad(msg, author_tag, is_reply):
         return 0
 
-    # =========================================================================
     # ПРИОРИТЕТ 5: БАНВОРДЫ
-    # =========================================================================
     for b_phrase, b_delay in db_get_banwords():
         norm_phrase = " ".join(b_phrase.lower().split())
         if norm_phrase in norm_text:
             return b_delay
 
-    # =========================================================================
-    # ПРИОРИТЕТ 6: ДЛИННЫЕ МЕНЮ / ТОПЫ / СТАТЬИ (30 сек)
-    # =========================================================================
+    # ПРИОРИТЕТ 6: ДЛИННЫЕ МЕНЮ / СТАТЬИ
     lines_count = len(text.split('\n'))
     has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
     is_long_text = len(text) > 250 or lines_count >= 5 or "teletype.in" in text.lower()
@@ -424,9 +412,7 @@ def classify_bot_message(event, author_tag: str) -> int | None:
     if is_long_text or has_large_buttons:
         return db_get_timer('info_delay', 30)
 
-    # =========================================================================
-    # ПРИОРИТЕТ 7: РП-КОМАНДЫ И ДЕЙСТВИЯ (10 сек)
-    # =========================================================================
+    # ПРИОРИТЕТ 7: РП ДЕЙСТВИЯ
     return db_get_timer('rp_delay', 10)
 
 def extract_pattern(msg, author_tag: str) -> str:
@@ -490,12 +476,12 @@ async def main_handler(event):
             pass
 
     sender_username = (getattr(sender, 'username', '') or '').lower()
-    if sender_username == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo"):
+    if sender_username == LEX_BOT_USERNAME.lower() or text.lower().startswith("sudo") or text.startswith("."):
         return
 
     is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
 
-    # 1. ЛЮДИ (Регексы)
+    # 1. ЛЮДИ
     if not is_bot:
         for pattern, delay in db_get_human_regex():
             try:
@@ -544,7 +530,9 @@ async def sudo_handler(event):
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v4.3 — Панель управления**\n\n"
+            "🎯 **Sniper Userbot v4.4 — Панель управления**\n\n"
+            "🎛️ **Медиа Студия (FFmpeg):**\n"
+            "• `sudo медиа` — Интерактивное меню Media Studio\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
@@ -583,7 +571,7 @@ async def sudo_handler(event):
             await asyncio.sleep(4)
             await c.delete()
 
-        # 2. ИСКЛЮЧЕНИЯ (ФРАЗЫ)
+        # 2. ИСКЛЮЧЕНИЯ
         elif cmd in ["+искл", "+exc"]:
             phrase = val.strip()
             if event.is_reply and not phrase:
@@ -594,7 +582,7 @@ async def sudo_handler(event):
                 return await event.reply("❌ Укажи слово/фразу: `sudo +искл {фраза}` или ответь на сообщение.")
             
             if db_add_exception(phrase):
-                await event.reply(f"🛡️ Фраза `{phrase}` добавлена в белый список (Вечный иммунитет)!")
+                await event.reply(f"🛡️ Фраза `{phrase}` добавлена в белый список!")
             else:
                 await event.reply("⚠️ Ошибка сохранения в базу.")
 
@@ -608,7 +596,7 @@ async def sudo_handler(event):
             items = db_get_exceptions()
             await event.reply("🛡️ **Список исключений:**\n" + ("\n".join([f"• `{i}`" for i in items]) if items else "Пусто."))
 
-        # 3. БАНВОРДЫ (ФРАЗЫ И СЛОВОСОЧЕТАНИЯ)
+        # 3. БАНВОРДЫ
         elif cmd in ["+бан", "+ban"] and val:
             phrase, delay = parse_phrase_and_delay(val, default_delay=0)
             if not phrase:
@@ -630,7 +618,7 @@ async def sudo_handler(event):
             items = db_get_banwords()
             await event.reply("🚫 **Список бан-фраз:**\n" + ("\n".join([f"• `{w}` ({d}с)" for w, d in items]) if items else "Пусто."))
 
-        # 4. РЕГЕКСЫ (ДЛЯ ЛЮДЕЙ)
+        # 4. РЕГЕКСЫ
         elif cmd in ["+рег", "+reg"] and val:
             pattern, delay = parse_phrase_and_delay(val, default_delay=5)
             if not pattern:
@@ -696,7 +684,7 @@ async def sudo_handler(event):
             text = "👥 **Доверенные пользователи:**\n\n"
             for uid, uname in items:
                 text += f"• {uname} (`{uid}`)\n"
-            await event.reply(text if items else "Список доверенных пуст (работают владелец и админы группы).")
+            await event.reply(text if items else "Список доверенных пуст.")
 
         # 6. ТАЙМЕРЫ
         elif cmd in ["рп", "rp"] and val.isdigit():
@@ -723,8 +711,17 @@ async def main():
         return
     init_db()
     await client.start()
+
+    # Безопасная регистрация Media Studio
+    if HAS_MEDIA_STUDIO:
+        try:
+            register_media_studio(client, is_authorized_cb=is_authorized)
+            logging.info("🎛️ Media Studio успешно подключена.")
+        except Exception as e:
+            logging.error(f"❌ Ошибка регистрации Media Studio: {e}")
+
     me = await client.get_me()
-    logging.info(f"Sniper v4.3 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v4.4 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
