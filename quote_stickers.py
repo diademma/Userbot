@@ -1,4 +1,4 @@
-# quote_stickers.py — Автономный генератор 3D-видеостикеров с рукописным текстом
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.1
 import os
 import re
 import time
@@ -32,34 +32,31 @@ DAILY_LIMIT = 3
 DB_NAME = "sniper_memory_v3.db"
 MAX_CHAR_LIMIT = 45
 
-# Ссылка на красивый рукописный кириллический шрифт от Google Fonts
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/caveat/Caveat-Bold.ttf"
 
 # =========================================================================
-# КООРДИНАТЫ И ТАЙМИНГИ ДЛЯ 01.mp4 И 02.mp4
+# ТОЧНЫЕ ШАБЛОНЫ 01.mp4 И 02.mp4
 # =========================================================================
 TEMPLATES = {
     1: {
+        # Девочка в желтой шапке достает блокнот из-за спины
         "file": "templates/01.mp4",
         "start_time": 0.501,
         "end_time": 1.300,
+        "is_static": True,
         "pose_1": {
-            "time_sec": 0.501,
             "corners": np.float32([[82, 210], [237, 170], [256, 275], [114, 315]]),
-            "fingers": []
-        },
-        "pose_2": {
-            "time_sec": 0.650,
-            "corners": np.float32([[90, 250], [320, 170], [400, 355], [170, 445]]),
             "fingers": []
         }
     },
     2: {
+        # Сидящая девочка разворачивает рисунок (с 0.530с)
         "file": "templates/02.mp4",
-        "start_time": 0.534,
+        "start_time": 0.530, # Срабатывает ровно в момент показа блокнота!
         "end_time": 99.0,
+        "is_static": False,
         "pose_1": {
-            "time_sec": 0.534,
+            "time_sec": 0.530,
             "corners": np.float32([[170, 260], [275, 223], [305, 349], [220, 405]]),
             "fingers": np.array([[302, 301], [288, 299], [277, 312], [282, 323], [288, 336], [300, 347], [310, 353]], dtype=np.int32)
         },
@@ -104,7 +101,7 @@ def check_and_inc_limit(user_id: int) -> tuple[bool, int]:
     conn.close()
     return True, DAILY_LIMIT - new_count
 
-# --- ШРИФТ ---
+# --- ЗАГРУЗКА ШРИФТА ---
 def get_font_path():
     fonts_dir = Path("templates/fonts")
     fonts_dir.mkdir(parents=True, exist_ok=True)
@@ -119,18 +116,13 @@ def get_font_path():
 
 # --- УДАЛЕНИЕ БЕЛОГО ФОНА ВОКРУГ ДЕВОЧКИ ---
 def make_background_transparent(frame_bgra):
-    """
-    Удаляет внешний белый фон вокруг девочки через заливку от углов,
-    не затрагивая белую табличку внутри ее рук.
-    """
     h, w = frame_bgra.shape[:2]
     rgb = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
     flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-    diff = (22, 22, 22)
+    diff = (6, 6, 6)
 
-    # Заливаем только от 4 внешних углов кадра
     for seed in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-        if np.all(rgb[seed[1], seed[0]] >= 190):
+        if np.all(rgb[seed[1], seed[0]] >= 242):
             cv2.floodFill(
                 rgb, flood_mask, seed, (0, 255, 0),
                 diff, diff, flags=4 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY
@@ -140,17 +132,17 @@ def make_background_transparent(frame_bgra):
     frame_bgra[outer_bg, 3] = 0
     return frame_bgra
 
-# --- РЕНДЕР ТЕКСТА ---
-def render_text_plate(text: str, width=512, height=512):
-    img = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+# --- РЕНДЕР КРУПНОГО ТЕКСТА ---
+def render_text_plate(text: str, card_w=400, card_h=300):
+    img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
     font_file = get_font_path()
 
     words = text.split()
-    font_size = 115
+    font_size = 140
     lines = []
 
-    while font_size > 24:
+    while font_size > 28:
         try:
             font = ImageFont.truetype(font_file, font_size)
         except Exception:
@@ -161,26 +153,25 @@ def render_text_plate(text: str, width=512, height=512):
         for w in words:
             test = f"{curr} {w}".strip()
             bbox = draw.textbbox((0, 0), test, font=font)
-            if bbox[2] - bbox[0] < width - 40:
+            if bbox[2] - bbox[0] < card_w - 30:
                 curr = test
             else:
                 if curr: lines.append(curr)
                 curr = w
         if curr: lines.append(curr)
 
-        total_h = len(lines) * (font_size * 1.1)
-        if total_h < height - 50:
+        total_h = len(lines) * (font_size * 1.05)
+        if total_h < card_h - 30:
             break
-        font_size -= 5
+        font_size -= 4
 
-    y = (height - (len(lines) * font_size * 1.1)) / 2
+    y = (card_h - (len(lines) * font_size * 1.05)) / 2
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         line_w = bbox[2] - bbox[0]
-        x = (width - line_w) / 2
-        # Темный стильный маркерный цвет
-        draw.text((x, y), line, fill=(200, 35, 60, 255), font=font)
-        y += font_size * 1.1
+        x = (card_w - line_w) / 2
+        draw.text((x, y), line, fill=(200, 30, 55, 255), font=font)
+        y += font_size * 1.05
 
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGRA)
 
@@ -193,8 +184,10 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
 
     cap = cv2.VideoCapture(cfg["file"])
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    text_plate = render_text_plate(text)
-    src_pts = np.float32([[0, 0], [512, 0], [512, 512], [0, 512]])
+    
+    card_w, card_h = 400, 300
+    text_plate = render_text_plate(text, card_w=card_w, card_h=card_h)
+    src_pts = np.float32([[0, 0], [card_w, 0], [card_w, card_h], [0, card_h]])
 
     ffmpeg_cmd = [
         'ffmpeg', '-hide_banner', '-y',
@@ -205,7 +198,7 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         '-r', str(fps),
         '-i', '-',
         '-c:v', 'libvpx-vp9',
-        '-crf', '32',
+        '-crf', '30',
         '-b:v', '250k',
         '-pix_fmt', 'yuva420p',
         '-an',
@@ -220,10 +213,9 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         stderr=asyncio.subprocess.DEVNULL
     )
 
-    p1 = cfg["pose_1"]
-    p2 = cfg["pose_2"]
     start_t = cfg["start_time"]
     end_t = cfg["end_time"]
+    is_static = cfg.get("is_static", False)
 
     frame_idx = 0
     while True:
@@ -241,23 +233,30 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         # 1. Удаляем внешний белый фон вокруг девочки
         frame = make_background_transparent(frame)
 
-        # 2. Накладываем 3D-текст
+        # 2. Накладываем 3D-текст строго в заданный промежуток времени
         if start_t <= cur_t <= end_t:
-            if cur_t <= p1["time_sec"]:
-                dst_pts = p1["corners"]
-                fingers = p1["fingers"]
-            elif cur_t >= p2["time_sec"]:
-                dst_pts = p2["corners"]
-                fingers = p2["fingers"]
+            if is_static:
+                dst_pts = cfg["pose_1"]["corners"]
+                fingers = cfg["pose_1"]["fingers"]
             else:
-                f = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
-                dst_pts = (p1["corners"] + (p2["corners"] - p1["corners"]) * f).astype(np.float32)
-                fingers = p2["fingers"] if f > 0.5 else p1["fingers"]
+                p1 = cfg["pose_1"]
+                p2 = cfg["pose_2"]
+                if cur_t <= p1["time_sec"]:
+                    dst_pts = p1["corners"]
+                    fingers = p1["fingers"]
+                elif cur_t >= p2["time_sec"]:
+                    dst_pts = p2["corners"]
+                    fingers = p2["fingers"]
+                else:
+                    f = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
+                    dst_pts = (p1["corners"] + (p2["corners"] - p1["corners"]) * f).astype(np.float32)
+                    fingers = p2["fingers"] if f > 0.5 else p1["fingers"]
 
+            # Честная 3D-гомография
             M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-            warped = cv2.warpPerspective(text_plate, M, (512, 512), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+            warped = cv2.warpPerspective(text_card, M, (512, 512), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
-            # 3. Восстанавливаем пальцы поверх текста
+            # Вырез пальчиков поверх текста
             if len(fingers) >= 3:
                 f_mask = np.zeros((512, 512), dtype=np.uint8)
                 cv2.fillPoly(f_mask, [fingers], 255)
@@ -286,7 +285,7 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
     return os.path.exists(output_file) and os.path.getsize(output_file) > 1000
 
 # =========================================================================
-# РЕГИСТРАЦИЯ МОДУЛЯ ДЛЯ TELETHON
+# РЕГИСТРАЦИЯ ДЛЯ TELETHON
 # =========================================================================
 def register_quote_stickers(client, is_authorized_cb=None):
     init_db()
@@ -324,7 +323,6 @@ def register_quote_stickers(client, is_authorized_cb=None):
         chosen_template = None
         text_arg = ""
 
-        # Проверяем, указан ли номер шаблона вручную: sudo цитата 1 <текст>
         if len(parts) > 2 and parts[1] in ("1", "2"):
             chosen_template = int(parts[1])
             text_arg = parts[2].strip()
@@ -334,15 +332,13 @@ def register_quote_stickers(client, is_authorized_cb=None):
             else:
                 text_arg = raw.split(maxsplit=1)[1].strip()
 
-        # Если текста в аргументе нет — тянем из реплая
         if not text_arg and event.is_reply:
             rep = await event.get_reply_message()
             text_arg = (rep.raw_text or rep.message or "").strip()
 
         if not text_arg:
-            return await event.reply("❌ **Укажи текст!**\nПример: `sudo цитата Привет` или ответь командой на сообщение.")
+            return await event.reply("❌ **Укажи текст!**\nПример: `sudo цитата Привет` или ответь на сообщение.")
 
-        # Проверка лимита символов
         if len(text_arg) > MAX_CHAR_LIMIT:
             return await event.reply(
                 f"⚠️ **Текст слишком длинный!**\n"
@@ -350,7 +346,6 @@ def register_quote_stickers(client, is_authorized_cb=None):
                 f"Табличка маленькая, сократи цитату."
             )
 
-        # Если шаблон не задан вручную — выбираем случайно 1 или 2
         if not chosen_template:
             chosen_template = random.choice([1, 2])
 
@@ -361,7 +356,7 @@ def register_quote_stickers(client, is_authorized_cb=None):
             
             ok = await generate_quote_sticker(text_arg, chosen_template, out_file)
             if not ok:
-                return await status.edit("❌ Ошибка сборки видеостикера. Проверь наличие шаблонов в `templates/`.")
+                return await status.edit("❌ Ошибка сборки видеостикера. Проверь наличие `01.mp4` и `02.mp4` в `templates/`.")
 
             custom_attributes = [
                 DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty()),
