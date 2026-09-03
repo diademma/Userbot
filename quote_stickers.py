@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.3
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.4
 import os
 import re
 import time
@@ -54,13 +54,13 @@ TEMPLATES = {
         }
     },
     2: {
-        # Сидящая девочка разворачивает рисунок (с 0.530с)
+        # Сидящая девочка разворачивает рисунок (раннее зажигание с 0.420с)
         "file": "templates/02.mp4",
-        "start_time": 0.530,
+        "start_time": 0.420, # Сместили на 0.420с, чтобы 'OK' не проскакивал даже на долю секунды!
         "end_time": 99.0,
         "is_static": False,
         "pose_1": {
-            "time_sec": 0.530,
+            "time_sec": 0.534,
             "corners": np.float32([[170, 260], [275, 223], [305, 349], [220, 405]]),
             "fingers": np.array([[302, 301], [288, 299], [277, 312], [282, 323], [288, 336], [300, 347], [310, 353]], dtype=np.int32)
         },
@@ -148,7 +148,7 @@ def make_background_transparent(frame_bgra):
     frame_bgra[outer_bg, 3] = 0
     return frame_bgra
 
-# --- РЕНДЕР КРАСИВОГО ТЕКСТА С ЗАЩИТНЫМИ ПОЛЯМИ ---
+# --- РЕНДЕР ТЕКСТА С ПОЛЯМИ БЕЗОПАСНОСТИ ---
 def render_text_plate(text: str, card_w=400, card_h=300):
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -156,7 +156,6 @@ def render_text_plate(text: str, card_w=400, card_h=300):
 
     words = text.split()
     
-    # Безопасные поля, чтобы текст гарантированно не залезал на края
     pad_x = 42
     pad_y = 35
     avail_w = card_w - (pad_x * 2)
@@ -195,7 +194,6 @@ def render_text_plate(text: str, card_w=400, card_h=300):
             
         font_size -= 3
 
-    # Идеальное центрирование строго внутри безопасной зоны
     line_h = font_size * 1.05
     start_y = pad_y + (avail_h - (len(lines) * line_h)) / 2
     
@@ -204,7 +202,6 @@ def render_text_plate(text: str, card_w=400, card_h=300):
         line_w = bbox[2] - bbox[0]
         x = pad_x + (avail_w - line_w) / 2
         y = start_y + (i * line_h)
-        # Насыщенный темно-красный маркерный оттенок
         draw.text((x, y), line, fill=(185, 25, 45, 255), font=font)
 
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGRA)
@@ -345,7 +342,6 @@ def register_quote_stickers(client, is_authorized_cb=None):
 
         return False, "Доступ ограничен."
 
-    # Четкий парсер без захвата служебного слова "цитата"
     CMD_REGEX = re.compile(r"^(?:sudo\s+)?(?:\.|\/)?(?:цитата|цит|quote)(?:\s+(1|2))?(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
 
     @client.on(events.NewMessage(func=lambda e: bool(CMD_REGEX.match((e.raw_text or "").strip()))))
@@ -363,7 +359,6 @@ def register_quote_stickers(client, is_authorized_cb=None):
         text_arg = (match.group(2) or "").strip()
         chosen_template = int(tmpl_group) if tmpl_group else None
 
-        # Если текста в аргументе нет — берем из реплая
         if not text_arg and event.is_reply:
             rep = await event.get_reply_message()
             text_arg = (rep.raw_text or rep.message or "").strip()
