@@ -1,4 +1,4 @@
-# CODEVER: v4.4 | Sniper Userbot + Media Studio (Fault-Tolerant Engine)
+# CODEVER: v4.5 | Sniper Userbot + Media Studio + 3D Quote Stickers
 import os
 import re
 import sys
@@ -11,13 +11,20 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User, MessageEntityTextUrl
 
-# --- БЕЗОПАСНЫЙ ИМПОРТ MEDIA STUDIO ---
+# --- БЕЗОПАСНЫЙ ИМПОРТ МОДУЛЕЙ ---
 try:
     from media_studio import register_media_studio
     HAS_MEDIA_STUDIO = True
 except Exception as e:
     HAS_MEDIA_STUDIO = False
     logging.warning(f"⚠️ Media Studio не загружен (будет пропущен): {e}")
+
+try:
+    from quote_stickers import register_quote_stickers
+    HAS_QUOTE_STICKERS = True
+except Exception as e:
+    HAS_QUOTE_STICKERS = False
+    logging.warning(f"⚠️ Quote Stickers не загружен (будет пропущен): {e}")
 
 # --- БУФЕР ЛОГОВ В ПАМЯТИ ---
 class MemoryLogHandler(logging.Handler):
@@ -72,7 +79,7 @@ def save_db_to_git():
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
         subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
         subprocess.run(["git", "add", DB_NAME], check=True)
-        subprocess.run(["git", "commit", "-m", "chore: sync db v4.4 [skip ci]"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: sync db v4.5 [skip ci]"], check=True)
         subprocess.run(["git", "push"], check=True)
         logging.info("БД сохранена в GitHub.")
     except Exception as e:
@@ -530,9 +537,10 @@ async def sudo_handler(event):
         rp_t = db_get_timer('rp_delay', 10)
         info_t = db_get_timer('info_delay', 30)
         help_text = (
-            "🎯 **Sniper Userbot v4.4 — Панель управления**\n\n"
-            "🎛️ **Медиа Студия (FFmpeg):**\n"
-            "• `sudo медиа` — Интерактивное меню Media Studio\n\n"
+            "🎯 **Sniper Userbot v4.5 — Панель управления**\n\n"
+            "🎛️ **Медиа и Стикеры:**\n"
+            "• `sudo медиа` — Интерактивное меню Media Studio\n"
+            "• `sudo цитата` — сделать стикер цитату\n\n"
             "🚨 **Реклама:**\n"
             "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
             "🛡️ **Исключения (Иммунитет):**\n"
@@ -720,8 +728,16 @@ async def main():
         except Exception as e:
             logging.error(f"❌ Ошибка регистрации Media Studio: {e}")
 
+    # Безопасная регистрация генератора 3D-стикеров
+    if HAS_QUOTE_STICKERS:
+        try:
+            register_quote_stickers(client, is_authorized_cb=is_authorized)
+            logging.info("✨ Quote Stickers успешно подключен.")
+        except Exception as e:
+            logging.error(f"❌ Ошибка регистрации Quote Stickers: {e}")
+
     me = await client.get_me()
-    logging.info(f"Sniper v4.4 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
+    logging.info(f"Sniper v4.5 успешно запущен! Аккаунт: {me.first_name} (@{me.username})")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
