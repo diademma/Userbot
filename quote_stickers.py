@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.1
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.2
 import os
 import re
 import time
@@ -32,7 +32,8 @@ DAILY_LIMIT = 3
 DB_NAME = "sniper_memory_v3.db"
 MAX_CHAR_LIMIT = 45
 
-FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/caveat/Caveat-Bold.ttf"
+# Надежная прямая ссылка на рукописный кириллический шрифт
+FONT_URL = "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/MarckScript-Regular.ttf"
 
 # =========================================================================
 # ТОЧНЫЕ ШАБЛОНЫ 01.mp4 И 02.mp4
@@ -52,7 +53,7 @@ TEMPLATES = {
     2: {
         # Сидящая девочка разворачивает рисунок (с 0.530с)
         "file": "templates/02.mp4",
-        "start_time": 0.530, # Срабатывает ровно в момент показа блокнота!
+        "start_time": 0.530,
         "end_time": 99.0,
         "is_static": False,
         "pose_1": {
@@ -105,13 +106,21 @@ def check_and_inc_limit(user_id: int) -> tuple[bool, int]:
 def get_font_path():
     fonts_dir = Path("templates/fonts")
     fonts_dir.mkdir(parents=True, exist_ok=True)
-    font_path = fonts_dir / "Caveat-Bold.ttf"
+    font_path = fonts_dir / "Handwritten.ttf"
+    
     if not font_path.exists() or font_path.stat().st_size < 1000:
         try:
-            LOGGER.info("Скачиваю рукописный шрифт Caveat...")
-            urllib.request.urlretrieve(FONT_URL, str(font_path))
+            LOGGER.info("Скачиваю рукописный шрифт...")
+            req = urllib.request.Request(FONT_URL, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as resp, open(font_path, "wb") as f:
+                f.write(resp.read())
         except Exception as e:
             LOGGER.warning(f"Ошибка загрузки шрифта: {e}")
+            # Резерв на системный шрифт Linux
+            sys_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            if sys_font.exists():
+                return str(sys_font)
+                
     return str(font_path)
 
 # --- УДАЛЕНИЕ БЕЛОГО ФОНА ВОКРУГ ДЕВОЧКИ ---
@@ -146,7 +155,10 @@ def render_text_plate(text: str, card_w=400, card_h=300):
         try:
             font = ImageFont.truetype(font_file, font_size)
         except Exception:
-            font = ImageFont.load_default()
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
 
         lines = []
         curr = ""
@@ -230,10 +242,10 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         if frame.shape[2] == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
 
-        # 1. Удаляем внешний белый фон вокруг девочки
+        # 1. Удаляем внешний белый фон
         frame = make_background_transparent(frame)
 
-        # 2. Накладываем 3D-текст строго в заданный промежуток времени
+        # 2. Накладываем 3D-текст
         if start_t <= cur_t <= end_t:
             if is_static:
                 dst_pts = cfg["pose_1"]["corners"]
@@ -252,9 +264,9 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
                     dst_pts = (p1["corners"] + (p2["corners"] - p1["corners"]) * f).astype(np.float32)
                     fingers = p2["fingers"] if f > 0.5 else p1["fingers"]
 
-            # Честная 3D-гомография
+            # 3D-гомография
             M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-            warped = cv2.warpPerspective(text_card, M, (512, 512), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+            warped = cv2.warpPerspective(text_plate, M, (512, 512), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
             # Вырез пальчиков поверх текста
             if len(fingers) >= 3:
