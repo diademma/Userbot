@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.2
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.3
 import os
 import re
 import time
@@ -32,8 +32,11 @@ DAILY_LIMIT = 3
 DB_NAME = "sniper_memory_v3.db"
 MAX_CHAR_LIMIT = 45
 
-# Надежная прямая ссылка на рукописный кириллический шрифт
-FONT_URL = "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/MarckScript-Regular.ttf"
+# Прямые ссылки на красивые рукописные кириллические шрифты
+FONT_URLS = [
+    "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/MarckScript-Regular.ttf",
+    "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/BadScript-Regular.ttf"
+]
 
 # =========================================================================
 # ТОЧНЫЕ ШАБЛОНЫ 01.mp4 И 02.mp4
@@ -109,17 +112,21 @@ def get_font_path():
     font_path = fonts_dir / "Handwritten.ttf"
     
     if not font_path.exists() or font_path.stat().st_size < 1000:
-        try:
-            LOGGER.info("Скачиваю рукописный шрифт...")
-            req = urllib.request.Request(FONT_URL, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=15) as resp, open(font_path, "wb") as f:
-                f.write(resp.read())
-        except Exception as e:
-            LOGGER.warning(f"Ошибка загрузки шрифта: {e}")
-            # Резерв на системный шрифт Linux
-            sys_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-            if sys_font.exists():
-                return str(sys_font)
+        for url in FONT_URLS:
+            try:
+                LOGGER.info("Скачиваю рукописный шрифт...")
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=10) as resp, open(font_path, "wb") as f:
+                    f.write(resp.read())
+                if font_path.stat().st_size > 1000:
+                    break
+            except Exception:
+                continue
+
+    if not font_path.exists() or font_path.stat().st_size < 1000:
+        sys_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+        if sys_font.exists():
+            return str(sys_font)
                 
     return str(font_path)
 
@@ -141,17 +148,24 @@ def make_background_transparent(frame_bgra):
     frame_bgra[outer_bg, 3] = 0
     return frame_bgra
 
-# --- РЕНДЕР КРУПНОГО ТЕКСТА ---
+# --- РЕНДЕР КРАСИВОГО ТЕКСТА С ЗАЩИТНЫМИ ПОЛЯМИ ---
 def render_text_plate(text: str, card_w=400, card_h=300):
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
     font_file = get_font_path()
 
     words = text.split()
-    font_size = 140
+    
+    # Безопасные поля, чтобы текст гарантированно не залезал на края
+    pad_x = 42
+    pad_y = 35
+    avail_w = card_w - (pad_x * 2)
+    avail_h = card_h - (pad_y * 2)
+
+    font_size = 90
     lines = []
 
-    while font_size > 28:
+    while font_size > 18:
         try:
             font = ImageFont.truetype(font_file, font_size)
         except Exception:
@@ -165,25 +179,33 @@ def render_text_plate(text: str, card_w=400, card_h=300):
         for w in words:
             test = f"{curr} {w}".strip()
             bbox = draw.textbbox((0, 0), test, font=font)
-            if bbox[2] - bbox[0] < card_w - 30:
+            if (bbox[2] - bbox[0]) <= avail_w:
                 curr = test
             else:
                 if curr: lines.append(curr)
                 curr = w
         if curr: lines.append(curr)
 
-        total_h = len(lines) * (font_size * 1.05)
-        if total_h < card_h - 30:
+        line_h = font_size * 1.05
+        total_h = len(lines) * line_h
+        
+        all_fit = all((draw.textbbox((0, 0), l, font=font)[2] - draw.textbbox((0, 0), l, font=font)[0]) <= avail_w for l in lines)
+        if total_h <= avail_h and all_fit:
             break
-        font_size -= 4
+            
+        font_size -= 3
 
-    y = (card_h - (len(lines) * font_size * 1.05)) / 2
-    for line in lines:
+    # Идеальное центрирование строго внутри безопасной зоны
+    line_h = font_size * 1.05
+    start_y = pad_y + (avail_h - (len(lines) * line_h)) / 2
+    
+    for i, line in enumerate(lines):
         bbox = draw.textbbox((0, 0), line, font=font)
         line_w = bbox[2] - bbox[0]
-        x = (card_w - line_w) / 2
-        draw.text((x, y), line, fill=(200, 30, 55, 255), font=font)
-        y += font_size * 1.05
+        x = pad_x + (avail_w - line_w) / 2
+        y = start_y + (i * line_h)
+        # Насыщенный темно-красный маркерный оттенок
+        draw.text((x, y), line, fill=(185, 25, 45, 255), font=font)
 
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGRA)
 
@@ -245,7 +267,7 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         # 1. Удаляем внешний белый фон
         frame = make_background_transparent(frame)
 
-        # 2. Накладываем 3D-текст
+        # 2. Накладываем 3D-текст строго в заданный промежуток времени
         if start_t <= cur_t <= end_t:
             if is_static:
                 dst_pts = cfg["pose_1"]["corners"]
@@ -323,27 +345,25 @@ def register_quote_stickers(client, is_authorized_cb=None):
 
         return False, "Доступ ограничен."
 
-    @client.on(events.NewMessage(func=lambda e: (e.raw_text or "").strip().lower().startswith(("sudo цитата", "sudo цит", ".цитата", ".цит"))))
+    # Четкий парсер без захвата служебного слова "цитата"
+    CMD_REGEX = re.compile(r"^(?:sudo\s+)?(?:\.|\/)?(?:цитата|цит|quote)(?:\s+(1|2))?(?:\s+(.+))?$", re.IGNORECASE | re.DOTALL)
+
+    @client.on(events.NewMessage(func=lambda e: bool(CMD_REGEX.match((e.raw_text or "").strip()))))
     async def quote_cmd_handler(event):
         has_access, quota_msg = await check_access(event, consume_quota=True)
         if not has_access:
             return await event.reply(quota_msg)
 
         raw = event.raw_text.strip()
-        parts = raw.split(maxsplit=2)
-        
-        chosen_template = None
-        text_arg = ""
+        match = CMD_REGEX.match(raw)
+        if not match:
+            return
 
-        if len(parts) > 2 and parts[1] in ("1", "2"):
-            chosen_template = int(parts[1])
-            text_arg = parts[2].strip()
-        elif len(parts) > 1:
-            if parts[1] in ("1", "2"):
-                chosen_template = int(parts[1])
-            else:
-                text_arg = raw.split(maxsplit=1)[1].strip()
+        tmpl_group = match.group(1)
+        text_arg = (match.group(2) or "").strip()
+        chosen_template = int(tmpl_group) if tmpl_group else None
 
+        # Если текста в аргументе нет — берем из реплая
         if not text_arg and event.is_reply:
             rep = await event.get_reply_message()
             text_arg = (rep.raw_text or rep.message or "").strip()
