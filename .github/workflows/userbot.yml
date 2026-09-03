@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: write # Дает право воркфлоу перезапускать самого себя
+      actions: write
 
     steps:
       - name: Checkout Repository
@@ -35,7 +35,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install telethon rlottie-python pillow opencv-python-headless numpy requests
+          pip install telethon rlottie-python pillow opencv-python-headless numpy requests pilmoji
 
       - name: Run Userbot with Auto-Relay
         env:
@@ -44,8 +44,6 @@ jobs:
           SESSION_STRING: ${{ secrets.SESSION_STRING }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Запуск бота с ограничением по времени 5 часов 40 минут (20400 сек)
-          # Это защищает от принудительного убийства гитхабом на 6 часах
           timeout 20400s python app.py || true
 
           echo "⏳ Время смены караула (5ч 40м вышло). Запускаем следующий цикл..."
