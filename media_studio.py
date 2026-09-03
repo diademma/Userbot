@@ -1,4 +1,4 @@
-# media_studio.py — Высокоточный мультимедиа комбайн v2.3
+# media_studio.py — Высокоточный мультимедиа комбайн v2.4 (Lottie/TGS + Bulletproof Menu)
 import os
 import re
 import shutil
@@ -18,6 +18,13 @@ from telethon.tl.types import (
     InputStickerSetEmpty
 )
 
+# Поддержка векторных анимированных стикеров Telegram (.tgs)
+try:
+    from rlottie_python import LottieAnimation
+    HAS_RLOTTIE = True
+except Exception:
+    HAS_RLOTTIE = False
+
 LOGGER = logging.getLogger("MediaStudio")
 
 OWNER_ID = 5421909121
@@ -26,7 +33,6 @@ TARGET_CHAT_ID = -1002281822286
 DAILY_LIMIT = 3
 DB_NAME = "sniper_memory_v3.db"
 
-# Словарь ожидания обложек: {(chat_id, user_id): audio_message}
 COVER_WAITING = {}
 
 def get_ffmpeg_bin() -> str:
@@ -75,7 +81,7 @@ def check_and_inc_limit(user_id: int) -> tuple[bool, int]:
     conn.close()
     return True, DAILY_LIMIT - new_count
 
-# --- АСИНХРОННЫЙ ЗАПУСК FFMPEG ---
+# --- АСИНХРОННЫЙ FFMPEG ---
 async def run_ffmpeg(cmd: list[str], timeout: int = 180) -> bool:
     async with SEMAPHORE:
         proc = await asyncio.create_subprocess_exec(
@@ -146,7 +152,7 @@ MENUS = {
         "──────────────\n\n"
         "• `.rmbg black` — Срезать черный фон (PNG)\n"
         "• `.rmbg white` — Срезать белый фон (PNG)\n"
-        "• `.to [png|jpg|webp|pdf|ico]` — Конвертация\n"
+        "• `.to [png|jpg|webp|pdf|ico|gif]` — Конвертация\n"
         "• `.sticker` — Фото в WebP стикер"
     ),
     "files": (
@@ -181,20 +187,26 @@ def register_media_studio(client, is_authorized_cb=None):
 
         return False, "Доступ ограничен."
 
-    # --- МЕНЮ SUDO МЕДИА ---
-    @client.on(events.NewMessage(pattern=r"^(?:sudo\s+)?(?:медиа|media)(?:\s+(.*))?$"))
+    # --- НАДЕЖНЫЙ ОБРАБОТЧИК МЕНЮ SUDO МЕДИА ---
+    @client.on(events.NewMessage(func=lambda e: (e.raw_text or "").replace('\xa0', ' ').strip().lower().startswith(("sudo медиа", "sudo media", "медиа", "media"))))
     async def media_menu_handler(event):
         has_access, _ = await check_access(event, consume_quota=False)
         if not has_access:
             return
-        section = (event.pattern_match.group(1) or "").strip().lower()
-        mapping = {
-            "аудио": "audio", "звук": "audio", "audio": "audio",
-            "видео": "video", "video": "video",
-            "фото": "photo", "photo": "photo", "фон": "photo",
-            "файлы": "files", "files": "files", "мета": "files"
-        }
-        text = MENUS.get(mapping.get(section, "main"), MENUS["main"])
+
+        tokens = event.raw_text.replace('\xa0', ' ').strip().lower().split()
+
+        if any(w in tokens for w in ("видео", "video")):
+            text = MENUS["video"]
+        elif any(w in tokens for w in ("аудио", "audio", "звук")):
+            text = MENUS["audio"]
+        elif any(w in tokens for w in ("фото", "photo", "фон", "стикеры", "стикер")):
+            text = MENUS["photo"]
+        elif any(w in tokens for w in ("файлы", "files", "мета", "файл")):
+            text = MENUS["files"]
+        else:
+            text = MENUS["main"]
+
         await event.reply(text)
 
     # --- ИНТЕРАКТИВНАЯ СМЕНА ОБЛОЖКИ ---
@@ -303,6 +315,19 @@ def register_media_studio(client, is_authorized_cb=None):
             mime_type = None
             custom_attributes = []
 
+            # Определение формата TGS (Lottie-стикер)
+            is_tgs = (in_file.suffix.lower() == ".tgs") or (getattr(reply_msg, "document", None) and "tgsticker" in (reply_msg.document.mime_type or ""))
+            if not is_tgs and in_file.exists():
+                try:
+                    with open(in_file, "rb") as f:
+                        if f.read(2) == b"\x1f\x8b":
+                            import gzip
+                            with gzip.open(in_file, "rt", encoding="utf-8") as gf:
+                                if '"v":' in gf.read(80):
+                                    is_tgs = True
+                except Exception:
+                    pass
+
             try:
                 # 🎵 АУДИО
                 if cmd == ".pitch":
@@ -400,7 +425,7 @@ def register_media_studio(client, is_authorized_cb=None):
                         DocumentAttributeImageSize(w=512, h=512)
                     ]
 
-                # 🎬 ОБЫЧНЫЙ ВИДЕОСТИКЕР WEBM
+                # 🎬 ЖИВОЙ ВИДЕОСТИКЕР WEBM
                 elif cmd == ".webm":
                     out_file = out_file.with_suffix(".webm")
                     vf = "scale=512:512:force_original_aspect_ratio=decrease"
@@ -427,13 +452,46 @@ def register_media_studio(client, is_authorized_cb=None):
                 # 🎞️ GIF АНИМАЦИЯ
                 elif cmd == ".gif":
                     out_file = out_file.with_suffix(".mp4")
-                    vf = "fps=20,scale=480:-1:flags=lanczos"
-                    ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-an", str(out_file)])
+                    if is_tgs:
+                        if not HAS_RLOTTIE:
+                            return await status.edit("⚠️ Для конвертации .tgs нужен `rlottie-python`. Добавьте его в workflow.")
+                        tmp_gif = tmp_path / "temp.gif"
+                        anim = LottieAnimation.from_tgs(str(in_file))
+                        anim.save_animation(str(tmp_gif))
+                        vf = "fps=20,scale=480:-1:flags=lanczos"
+                        ok = await run_ffmpeg(["-i", str(tmp_gif), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-an", str(out_file)])
+                    else:
+                        vf = "fps=20,scale=480:-1:flags=lanczos"
+                        ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-an", str(out_file)])
+
                     mime_type = "video/mp4"
                     custom_attributes = [
                         DocumentAttributeAnimated(),
                         DocumentAttributeVideo(duration=0, w=0, h=0, supports_streaming=True)
                     ]
+
+                # 🖼️ УНИВЕРСАЛЬНЫЙ КОНВЕРТЕР .TO (ВКЛЮЧАЯ TGS)
+                elif cmd == ".to":
+                    ext = args.lower().lstrip(".") or "png"
+                    out_file = out_file.with_suffix(f".{ext}")
+
+                    if is_tgs:
+                        if not HAS_RLOTTIE:
+                            return await status.edit("⚠️ Это векторный Lottie-стикер (.tgs).\nДобавьте `rlottie-python` в воркфлоу для его конвертации.")
+                        
+                        anim = LottieAnimation.from_tgs(str(in_file))
+                        if ext in ("gif", "webp", "apng"):
+                            anim.save_animation(str(out_file))
+                            ok = True
+                        else:
+                            tmp_gif = tmp_path / "temp.gif"
+                            anim.save_animation(str(tmp_gif))
+                            ok = await run_ffmpeg(["-i", str(tmp_gif), str(out_file)])
+                    elif ext == "gif":
+                        ok = await run_ffmpeg(["-i", str(in_file), "-vf", "fps=18,scale=512:-1:flags=lanczos", str(out_file)])
+                        mime_type = "image/gif"
+                    else:
+                        ok = await run_ffmpeg(["-i", str(in_file), str(out_file)])
 
                 # 🖼️ ФОТО / СТИКЕРЫ
                 elif cmd == ".rmbg":
@@ -442,11 +500,6 @@ def register_media_studio(client, is_authorized_cb=None):
                     vf = f"colorkey={color}:0.18:0.1,format=rgba"
                     ok = await run_ffmpeg(["-i", str(in_file), "-vf", vf, str(out_file)])
                     force_document = True
-
-                elif cmd == ".to":
-                    ext = args.lower().lstrip(".") or "png"
-                    out_file = out_file.with_suffix(f".{ext}")
-                    ok = await run_ffmpeg(["-i", str(in_file), str(out_file)])
 
                 elif cmd == ".sticker":
                     out_file = out_file.with_suffix(".webp")
@@ -478,7 +531,7 @@ def register_media_studio(client, is_authorized_cb=None):
                     return await status.delete()
 
                 if not ok or not out_file.exists():
-                    return await status.edit("❌ Ошибка FFmpeg при обработке.")
+                    return await status.edit("❌ Ошибка обработки файла.")
 
                 # Отправка результата
                 await event.client.send_file(
