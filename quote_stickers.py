@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.4
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.5 (С поддержкой EMOJI)
 import os
 import re
 import time
@@ -16,6 +16,13 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+# Поддержка сочных цветных эмодзи
+try:
+    from pilmoji import Pilmoji
+    HAS_PILMOJI = True
+except Exception:
+    HAS_PILMOJI = False
+
 from telethon import events
 from telethon.tl.types import (
     DocumentAttributeVideo,
@@ -32,7 +39,7 @@ DAILY_LIMIT = 3
 DB_NAME = "sniper_memory_v3.db"
 MAX_CHAR_LIMIT = 45
 
-# Прямые ссылки на красивые рукописные кириллические шрифты
+# Прямые ссылки на рукописные кириллические шрифты
 FONT_URLS = [
     "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/MarckScript-Regular.ttf",
     "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/BadScript-Regular.ttf"
@@ -54,9 +61,9 @@ TEMPLATES = {
         }
     },
     2: {
-        # Сидящая девочка разворачивает рисунок (раннее зажигание с 0.420с)
+        # Сидящая девочка разворачивает рисунок (с 0.420с)
         "file": "templates/02.mp4",
-        "start_time": 0.420, # Сместили на 0.420с, чтобы 'OK' не проскакивал даже на долю секунды!
+        "start_time": 0.420,
         "end_time": 99.0,
         "is_static": False,
         "pose_1": {
@@ -148,7 +155,7 @@ def make_background_transparent(frame_bgra):
     frame_bgra[outer_bg, 3] = 0
     return frame_bgra
 
-# --- РЕНДЕР ТЕКСТА С ПОЛЯМИ БЕЗОПАСНОСТИ ---
+# --- РЕНДЕР КРАСИВОГО ТЕКСТА С ЭМОДЗИ ---
 def render_text_plate(text: str, card_w=400, card_h=300):
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -185,7 +192,7 @@ def render_text_plate(text: str, card_w=400, card_h=300):
                 curr = w
         if curr: lines.append(curr)
 
-        line_h = font_size * 1.05
+        line_h = font_size * 1.1
         total_h = len(lines) * line_h
         
         all_fit = all((draw.textbbox((0, 0), l, font=font)[2] - draw.textbbox((0, 0), l, font=font)[0]) <= avail_w for l in lines)
@@ -194,15 +201,25 @@ def render_text_plate(text: str, card_w=400, card_h=300):
             
         font_size -= 3
 
-    line_h = font_size * 1.05
+    line_h = font_size * 1.1
     start_y = pad_y + (avail_h - (len(lines) * line_h)) / 2
     
-    for i, line in enumerate(lines):
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = bbox[2] - bbox[0]
-        x = pad_x + (avail_w - line_w) / 2
-        y = start_y + (i * line_h)
-        draw.text((x, y), line, fill=(185, 25, 45, 255), font=font)
+    # Рендеринг с цветными эмодзи через Pilmoji
+    if HAS_PILMOJI:
+        with Pilmoji(img) as pilmoji:
+            for i, line in enumerate(lines):
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_w = bbox[2] - bbox[0]
+                x = pad_x + (avail_w - line_w) / 2
+                y = start_y + (i * line_h)
+                pilmoji.text((x, y), line, fill=(185, 25, 45, 255), font=font)
+    else:
+        for i, line in enumerate(lines):
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_w = bbox[2] - bbox[0]
+            x = pad_x + (avail_w - line_w) / 2
+            y = start_y + (i * line_h)
+            draw.text((x, y), line, fill=(185, 25, 45, 255), font=font)
 
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGRA)
 
@@ -264,7 +281,7 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         # 1. Удаляем внешний белый фон
         frame = make_background_transparent(frame)
 
-        # 2. Накладываем 3D-текст строго в заданный промежуток времени
+        # 2. Накладываем 3D-текст
         if start_t <= cur_t <= end_t:
             if is_static:
                 dst_pts = cfg["pose_1"]["corners"]
