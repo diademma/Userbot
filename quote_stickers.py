@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.7 (Smooth Alpha Silhouette + Island Cleaner)
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.8
 import os
 import re
 import time
@@ -147,7 +147,7 @@ def make_background_transparent(frame_bgra, protected_corners=None):
     """
     h, w = frame_bgra.shape[:2]
     rgb = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
-    hsv = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2HSV)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV)
 
     # 1. Детектор белых островков: очень светлые пиксели с околонулевой насыщенностью
     lower_white = np.array([0, 0, 236], dtype=np.uint8)
@@ -183,8 +183,7 @@ def make_background_transparent(frame_bgra, protected_corners=None):
     # Инвертируем: получаем маску силуэта девочки и таблички
     fg_mask = cv2.bitwise_not(total_bg)
 
-    # 4. МЯГКИЙ СУБПИКСЕЛЬНЫЙ КРАЙ (Anti-Aliased Feathering):
-    # Легкое Гауссово размытие альфа-канала сглаживает все острые лесенки
+    # 4. МЯГКИЙ СУБПИКСЕЛЬНЫЙ КРАЙ (Anti-Aliased Feathering)
     smooth_alpha = cv2.GaussianBlur(fg_mask, (3, 3), 0.75)
     
     frame_bgra[:, :, 3] = smooth_alpha
@@ -200,10 +199,10 @@ def render_text_plate(text: str, card_w=400, card_h=300):
     
     pad_x = 22
     pad_y = 18
-    avail_w = card_w - (pad_x * 2) # 356px
-    avail_h = card_h - (pad_y * 2) # 264px
+    avail_w = card_w - (pad_x * 2)
+    avail_h = card_h - (pad_y * 2)
 
-    font_size = 160 # Начинаем с огромного размера!
+    font_size = 160
     best_lines = []
     best_font = None
 
@@ -258,7 +257,7 @@ def render_text_plate(text: str, card_w=400, card_h=300):
     total_h = len(best_lines) * line_h
     start_y = pad_y + (avail_h - total_h) / 2
 
-    text_color = (195, 25, 45, 255) # Насыщенный фломастерный красный
+    text_color = (195, 25, 45, 255)
 
     if HAS_PILMOJI:
         with Pilmoji(img, source=AppleEmojiSource) as pilmoji:
