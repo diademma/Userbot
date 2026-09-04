@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.6 (Apple Emojis + Big Font Scaling)
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.7 (Smooth Alpha Silhouette + Island Cleaner)
 import os
 import re
 import time
@@ -139,25 +139,58 @@ def get_font_path():
                 
     return str(font_path)
 
-# --- УДАЛЕНИЕ БЕЛОГО ФОНА ВОКРУГ ДЕВОЧКИ ---
-def make_background_transparent(frame_bgra):
+# --- ИДЕАЛЬНОЕ УДАЛЕНИЕ ФОНА (ВКЛЮЧАЯ ОСТРОВКИ МЕЖДУ ВОЛОСАМИ) + МЯГКИЙ КРАЙ ---
+def make_background_transparent(frame_bgra, protected_corners=None):
+    """
+    Удаляет внешний белый фон и внутренние белые островки (между волос/руками),
+    защищая табличку, и накладывает мягкое субпиксельное сглаживание по краям.
+    """
     h, w = frame_bgra.shape[:2]
     rgb = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
-    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-    diff = (6, 6, 6)
+    hsv = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2HSV)
 
+    # 1. Детектор белых островков: очень светлые пиксели с околонулевой насыщенностью
+    lower_white = np.array([0, 0, 236], dtype=np.uint8)
+    upper_white = np.array([180, 20, 255], dtype=np.uint8)
+    white_mask = cv2.inRange(hsv, lower_white, upper_white)
+
+    # 2. Защита: зона таблички НЕ должна стать прозрачной!
+    if protected_corners is not None and len(protected_corners) == 4:
+        card_poly = np.array(protected_corners, dtype=np.int32)
+        card_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(card_mask, [card_poly], 255)
+        
+        # Расширяем защиту таблички на 6 пикселей для надежности
+        kernel_protect = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        card_shield = cv2.dilate(card_mask, kernel_protect)
+        white_mask[card_shield == 255] = 0
+
+    # 3. Внешняя угловая заливка
+    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+    diff = (10, 10, 10)
     for seed in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
-        if np.all(rgb[seed[1], seed[0]] >= 242):
+        if np.all(rgb[seed[1], seed[0]] >= 235):
             cv2.floodFill(
                 rgb, flood_mask, seed, (0, 255, 0),
                 diff, diff, flags=4 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY
             )
 
     outer_bg = (flood_mask[1:-1, 1:-1] == 255)
-    frame_bgra[outer_bg, 3] = 0
+    
+    # Объединяем внешний фон и внутренние белые щели
+    total_bg = cv2.bitwise_or(white_mask, np.uint8(outer_bg * 255))
+    
+    # Инвертируем: получаем маску силуэта девочки и таблички
+    fg_mask = cv2.bitwise_not(total_bg)
+
+    # 4. МЯГКИЙ СУБПИКСЕЛЬНЫЙ КРАЙ (Anti-Aliased Feathering):
+    # Легкое Гауссово размытие альфа-канала сглаживает все острые лесенки
+    smooth_alpha = cv2.GaussianBlur(fg_mask, (3, 3), 0.75)
+    
+    frame_bgra[:, :, 3] = smooth_alpha
     return frame_bgra
 
-# --- ДИНАМИЧЕСКИЙ РАСЧЕТ И РЕНДЕР ТЕКСТА (КРУПНО ДЛЯ МАЛОГО ЧИСЛА СЛОВ) ---
+# --- РЕНДЕР КРУПНОГО ТЕКСТА С APPLE EMOJI ---
 def render_text_plate(text: str, card_w=400, card_h=300):
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -165,14 +198,12 @@ def render_text_plate(text: str, card_w=400, card_h=300):
 
     words = text.split()
     
-    # Минимальные отступы для максимального покрытия площади
     pad_x = 22
     pad_y = 18
     avail_w = card_w - (pad_x * 2) # 356px
     avail_h = card_h - (pad_y * 2) # 264px
 
-    # Начинаем с огромного размера шрифта!
-    font_size = 160
+    font_size = 160 # Начинаем с огромного размера!
     best_lines = []
     best_font = None
 
@@ -199,7 +230,6 @@ def render_text_plate(text: str, card_w=400, card_h=300):
             else:
                 if curr:
                     lines.append(curr)
-                # Проверяем, влезает ли само слово отдельно
                 w_single_len = draw.textbbox((0, 0), w, font=font)[2] - draw.textbbox((0, 0), w, font=font)[0]
                 if w_single_len > avail_w:
                     fits = False
@@ -228,7 +258,6 @@ def render_text_plate(text: str, card_w=400, card_h=300):
     total_h = len(best_lines) * line_h
     start_y = pad_y + (avail_h - total_h) / 2
 
-    # Рендеринг с Apple Emojis
     text_color = (195, 25, 45, 255) # Насыщенный фломастерный красный
 
     if HAS_PILMOJI:
@@ -304,33 +333,33 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         if frame.shape[2] == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
 
-        # 1. Удаляем внешний белый фон
-        frame = make_background_transparent(frame)
+        # Вычисляем положение таблички для защиты от прозрачности
+        if is_static:
+            dst_pts = cfg["pose_1"]["corners"]
+            fingers = cfg["pose_1"]["fingers"]
+        else:
+            p1 = cfg["pose_1"]
+            p2 = cfg["pose_2"]
+            if cur_t <= p1["time_sec"]:
+                dst_pts = p1["corners"]
+                fingers = p1["fingers"]
+            elif cur_t >= p2["time_sec"]:
+                dst_pts = p2["corners"]
+                fingers = p2["fingers"]
+            else:
+                f = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
+                dst_pts = (p1["corners"] + (p2["corners"] - p1["corners"]) * f).astype(np.float32)
+                fingers = p2["fingers"] if f > 0.5 else p1["fingers"]
+
+        # 1. Удаляем фон и щели между волосами с защитой таблички и мягким краем
+        frame = make_background_transparent(frame, protected_corners=dst_pts)
 
         # 2. Накладываем 3D-текст
         if start_t <= cur_t <= end_t:
-            if is_static:
-                dst_pts = cfg["pose_1"]["corners"]
-                fingers = cfg["pose_1"]["fingers"]
-            else:
-                p1 = cfg["pose_1"]
-                p2 = cfg["pose_2"]
-                if cur_t <= p1["time_sec"]:
-                    dst_pts = p1["corners"]
-                    fingers = p1["fingers"]
-                elif cur_t >= p2["time_sec"]:
-                    dst_pts = p2["corners"]
-                    fingers = p2["fingers"]
-                else:
-                    f = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
-                    dst_pts = (p1["corners"] + (p2["corners"] - p1["corners"]) * f).astype(np.float32)
-                    fingers = p2["fingers"] if f > 0.5 else p1["fingers"]
-
-            # 3D-гомография
             M = cv2.getPerspectiveTransform(src_pts, dst_pts)
             warped = cv2.warpPerspective(text_plate, M, (512, 512), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
-            # Вырез пальчиков поверх текста
+            # 3. Вырез пальчиков поверх текста
             if len(fingers) >= 3:
                 f_mask = np.zeros((512, 512), dtype=np.uint8)
                 cv2.fillPoly(f_mask, [fingers], 255)
