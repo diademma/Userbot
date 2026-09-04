@@ -4,10 +4,9 @@ import logging
 from telethon import events, Button
 from core.config import USERBOT_NAME, OWNER_ID
 from core.db import is_authorized, mem_logs, db_get_timer, db_get_trusted, db_get_exceptions
-from core.loader import get_loaded_modules
+from core.loader import get_loaded_modules, get_pending_modules
 
-# Сюда в будущем можно вставить прямую ссылку на картинку (например Telegraph или CDN)
-# Она зашьется в невидимый символ и отобразится как баннер в сообщении
+# Ссылка на фото-баннер для текстовой карточки
 HEADER_BANNER_URL = "" 
 
 MODULE_ICONS = {
@@ -17,22 +16,32 @@ MODULE_ICONS = {
 }
 
 def build_main_keyboard():
-    """Генерация кнопок главного меню на основе загруженных модулей"""
+    """Генерация кнопок с учетом активных и ожидающих модулей"""
     loaded = get_loaded_modules()
+    pending = get_pending_modules()
     buttons = []
     
-    # Кнопки для каждого активного модуля
     row = []
+    # 1. Готовые модули
     for mod_name in loaded.keys():
         title = MODULE_ICONS.get(mod_name, f"🧩 {mod_name.capitalize()}")
         row.append(Button.inline(title, data=f"open_mod_{mod_name}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
+
+    # 2. Модули в процессе загрузки библиотек
+    for mod_name in pending:
+        title = f"⏳ {mod_name.capitalize()} (Загрузка...)"
+        row.append(Button.inline(title, data=f"pending_mod_{mod_name}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+
     if row:
         buttons.append(row)
 
-    # Системные кнопки
+    # 3. Системные кнопки
     buttons.append([
         Button.inline("📜 Логи системы", data="menu_logs"),
         Button.inline("❌ Закрыть", data="menu_close")
@@ -43,7 +52,7 @@ def init_inline(user, bot):
     if not bot:
         return
 
-    # --- 1. ГЕНЕРАТОР КАРТОЧКИ МЕНЮ ---
+    # --- 1. ГЕНЕРАТОР КАРТОЧКИ ПО ИНЛАЙНУ ---
     @bot.on(events.InlineQuery)
     async def inline_query_handler(event):
         user_me = await user.get_me()
@@ -77,7 +86,7 @@ def init_inline(user, bot):
         )
         await event.answer([result], cache_time=1)
 
-    # --- 2. ОБРАБОТЧИК КЛИКОВ ПО КНОПКАМ ---
+    # --- 2. ОБРАБОТЧИК НАЖАТИЙ НА КНОПКИ ---
     @bot.on(events.CallbackQuery)
     async def callback_handler(event):
         if event.sender_id != OWNER_ID:
@@ -85,8 +94,12 @@ def init_inline(user, bot):
 
         data = event.data.decode("utf-8")
 
+        # КЛИК ПО МОДУЛЮ В ПРОЦЕССЕ ЗАГРУЗКИ
+        if data.startswith("pending_mod_"):
+            return await event.answer("⏳ Модуль докачивает библиотеки в фоне, подождите секунд 15...", alert=True)
+
         # ЗАКРЫТИЕ ПАНЕЛИ
-        if data == "menu_close":
+        elif data == "menu_close":
             start = time.perf_counter()
             await bot.get_me()
             ping_ms = round((time.perf_counter() - start) * 1000)
@@ -127,9 +140,8 @@ def init_inline(user, bot):
             text = (
                 f"🎯 **Управление модулем: Sniper & Антиспам**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"• Фильтрация рекламы и спам-ботов: **Активна**\n"
-                f"• Задержка РП-команд: **{rp_t}с**\n"
-                f"• Задержка инфо-меню: **{info_t}с**\n"
+                f"• Фильтрация спама и ботов: **Активна**\n"
+                f"• Таймер РП: **{rp_t}с** | Инфо: **{info_t}с**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"Выберите параметр для просмотра:"
             )
@@ -140,12 +152,11 @@ def init_inline(user, bot):
             ]
             await event.edit(text, buttons=btns)
 
-        # ПОДРАЗДЕЛЫ SNIPER
         elif data == "sub_sniper_timers":
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f"⏱️ **Настройка таймеров:**\n\n"
+                f"⏱️ **Настройка таймеров сноса:**\n\n"
                 f"• РП ботов: **{rp_t}с** (`sudo рп [сек]`)\n"
                 f"• Длинные инфо: **{info_t}с** (`sudo инфо [сек]`)"
             )
@@ -166,10 +177,9 @@ def init_inline(user, bot):
             text = (
                 f"🎛️ **Управление модулем: Media Studio**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"Модуль готов к обработке медиафайлов через FFmpeg.\n\n"
-                f"**Команды в чате:**\n"
-                f"• `sudo медиа` — Интерактивный редактор медиа\n"
-                f"• Конвертация видео в GIF, кружочки и извлечение звука"
+                f"Обработка медиа через статический FFmpeg.\n\n"
+                f"**Команды:**\n"
+                f"• `sudo медиа` — Интерактивный редактор медиа"
             )
             await event.edit(text, buttons=[[Button.inline("⬅️ Назад в меню", data="menu_main")]])
 
@@ -179,19 +189,19 @@ def init_inline(user, bot):
                 f"✨ **Управление модулем: Quote Stickers**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"Генерация 3D цитат-стикеров из сообщений.\n\n"
-                f"**Команды в чате:**\n"
-                f"• `sudo цитата` *(в реплай на смс)* — Сгенерировать стикер"
+                f"**Команды:**\n"
+                f"• `sudo цитата` *(в реплай)* — Создать стикер"
             )
             await event.edit(text, buttons=[[Button.inline("⬅️ Назад в меню", data="menu_main")]])
 
-        # ЛЮБОЙ ДРУГОЙ ДИНАМИЧЕСКИЙ МОДУЛЬ
+        # ДИНАМИЧЕСКИЙ МОДУЛЬ
         elif data.startswith("open_mod_"):
             mod_name = data.replace("open_mod_", "")
             text = (
                 f"🧩 **Модуль:** `{mod_name}`\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"Статус: Активен в памяти ядра.\n"
-                f"Для вызова используйте его команды в чате."
+                f"Используйте его команды в чате."
             )
             await event.edit(text, buttons=[[Button.inline("⬅️ Назад в меню", data="menu_main")]])
 
@@ -204,7 +214,7 @@ def init_inline(user, bot):
                 buttons=[[Button.inline("🔄 Обновить", data="menu_logs"), Button.inline("⬅️ Назад", data="menu_main")]]
             )
 
-    # --- 3. ТРИГГЕР ПО СЛОВУ SUDO ---
+    # --- 3. ВЫЗОВ ПО СЛОВУ SUDO ---
     @user.on(events.NewMessage(pattern=r"^sudo$"))
     async def sudo_open_menu(event):
         if not await is_authorized(event):
