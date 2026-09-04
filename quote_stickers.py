@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.5 (С поддержкой EMOJI)
+# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.6 (Apple Emojis + Big Font Scaling)
 import os
 import re
 import time
@@ -16,9 +16,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# Поддержка сочных цветных эмодзи
+# Поддержка современных Apple / iOS эмодзи
 try:
     from pilmoji import Pilmoji
+    from pilmoji.source import AppleEmojiSource
     HAS_PILMOJI = True
 except Exception:
     HAS_PILMOJI = False
@@ -39,8 +40,9 @@ DAILY_LIMIT = 3
 DB_NAME = "sniper_memory_v3.db"
 MAX_CHAR_LIMIT = 45
 
-# Прямые ссылки на рукописные кириллические шрифты
+# Надежные источники красивых жирных кириллических маркеров
 FONT_URLS = [
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/neucha/Neucha.ttf",
     "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/MarckScript-Regular.ttf",
     "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/BadScript-Regular.ttf"
 ]
@@ -121,7 +123,7 @@ def get_font_path():
     if not font_path.exists() or font_path.stat().st_size < 1000:
         for url in FONT_URLS:
             try:
-                LOGGER.info("Скачиваю рукописный шрифт...")
+                LOGGER.info("Скачиваю жирный маркерный шрифт...")
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req, timeout=10) as resp, open(font_path, "wb") as f:
                     f.write(resp.read())
@@ -155,7 +157,7 @@ def make_background_transparent(frame_bgra):
     frame_bgra[outer_bg, 3] = 0
     return frame_bgra
 
-# --- РЕНДЕР КРАСИВОГО ТЕКСТА С ЭМОДЗИ ---
+# --- ДИНАМИЧЕСКИЙ РАСЧЕТ И РЕНДЕР ТЕКСТА (КРУПНО ДЛЯ МАЛОГО ЧИСЛА СЛОВ) ---
 def render_text_plate(text: str, card_w=400, card_h=300):
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -163,15 +165,18 @@ def render_text_plate(text: str, card_w=400, card_h=300):
 
     words = text.split()
     
-    pad_x = 42
-    pad_y = 35
-    avail_w = card_w - (pad_x * 2)
-    avail_h = card_h - (pad_y * 2)
+    # Минимальные отступы для максимального покрытия площади
+    pad_x = 22
+    pad_y = 18
+    avail_w = card_w - (pad_x * 2) # 356px
+    avail_h = card_h - (pad_y * 2) # 264px
 
-    font_size = 90
-    lines = []
+    # Начинаем с огромного размера шрифта!
+    font_size = 160
+    best_lines = []
+    best_font = None
 
-    while font_size > 18:
+    while font_size > 22:
         try:
             font = ImageFont.truetype(font_file, font_size)
         except Exception:
@@ -182,44 +187,65 @@ def render_text_plate(text: str, card_w=400, card_h=300):
 
         lines = []
         curr = ""
+        fits = True
+
         for w in words:
             test = f"{curr} {w}".strip()
             bbox = draw.textbbox((0, 0), test, font=font)
-            if (bbox[2] - bbox[0]) <= avail_w:
+            w_len = bbox[2] - bbox[0]
+            
+            if w_len <= avail_w:
                 curr = test
             else:
-                if curr: lines.append(curr)
+                if curr:
+                    lines.append(curr)
+                # Проверяем, влезает ли само слово отдельно
+                w_single_len = draw.textbbox((0, 0), w, font=font)[2] - draw.textbbox((0, 0), w, font=font)[0]
+                if w_single_len > avail_w:
+                    fits = False
+                    break
                 curr = w
-        if curr: lines.append(curr)
 
-        line_h = font_size * 1.1
-        total_h = len(lines) * line_h
-        
-        all_fit = all((draw.textbbox((0, 0), l, font=font)[2] - draw.textbbox((0, 0), l, font=font)[0]) <= avail_w for l in lines)
-        if total_h <= avail_h and all_fit:
-            break
-            
+        if curr:
+            lines.append(curr)
+
+        if fits and lines:
+            line_h = font_size * 1.05
+            total_h = len(lines) * line_h
+            if total_h <= avail_h:
+                best_lines = lines
+                best_font = font
+                break
+
         font_size -= 3
 
-    line_h = font_size * 1.1
-    start_y = pad_y + (avail_h - (len(lines) * line_h)) / 2
-    
-    # Рендеринг с цветными эмодзи через Pilmoji
+    if not best_lines:
+        best_lines = [text]
+        best_font = ImageFont.load_default()
+        font_size = 24
+
+    line_h = font_size * 1.05
+    total_h = len(best_lines) * line_h
+    start_y = pad_y + (avail_h - total_h) / 2
+
+    # Рендеринг с Apple Emojis
+    text_color = (195, 25, 45, 255) # Насыщенный фломастерный красный
+
     if HAS_PILMOJI:
-        with Pilmoji(img) as pilmoji:
-            for i, line in enumerate(lines):
-                bbox = draw.textbbox((0, 0), line, font=font)
+        with Pilmoji(img, source=AppleEmojiSource) as pilmoji:
+            for i, line in enumerate(best_lines):
+                bbox = draw.textbbox((0, 0), line, font=best_font)
                 line_w = bbox[2] - bbox[0]
                 x = pad_x + (avail_w - line_w) / 2
                 y = start_y + (i * line_h)
-                pilmoji.text((x, y), line, fill=(185, 25, 45, 255), font=font)
+                pilmoji.text((x, y), line, fill=text_color, font=best_font, stroke_width=1, stroke_fill=text_color)
     else:
-        for i, line in enumerate(lines):
-            bbox = draw.textbbox((0, 0), line, font=font)
+        for i, line in enumerate(best_lines):
+            bbox = draw.textbbox((0, 0), line, font=best_font)
             line_w = bbox[2] - bbox[0]
             x = pad_x + (avail_w - line_w) / 2
             y = start_y + (i * line_h)
-            draw.text((x, y), line, fill=(185, 25, 45, 255), font=font)
+            draw.text((x, y), line, fill=text_color, font=best_font, stroke_width=1, stroke_fill=text_color)
 
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGRA)
 
