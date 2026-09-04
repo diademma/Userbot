@@ -2,56 +2,91 @@
 import os
 import sys
 import glob
+import asyncio
 import inspect
 import logging
 import subprocess
+import importlib
 import importlib.util
 from telethon import events
 from core.db import is_authorized
 
 MODULES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "modules"))
 
+# Реестр запущенных модулей в памяти
+LOADED_MODULES = {}
+PENDING_MODULES = []
+
+def get_loaded_modules():
+    """Возвращает словарь активных модулей"""
+    return LOADED_MODULES
+
 def load_single_module(file_path: str, user, bot=None) -> bool:
-    """Загрузка одного модуля в память"""
+    """Загрузка или горячий релоад одного модуля"""
     module_name = os.path.splitext(os.path.basename(file_path))[0]
     if module_name.startswith("_"):
         return False
 
     try:
-        spec = importlib.util.spec_from_file_location(module_name, file_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        if module_name in sys.modules:
+            module = importlib.reload(sys.modules[module_name])
+        else:
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
 
-        # 1. Новый формат register(user, bot) или register(user)
+        success = False
         if hasattr(module, "register"):
             sig = inspect.signature(module.register)
             if len(sig.parameters) >= 2 and bot:
                 module.register(user, bot)
             else:
                 module.register(user)
+            success = True
+
+        elif hasattr(module, "register_media_studio"):
+            module.register_media_studio(user, is_authorized_cb=is_authorized)
+            success = True
+
+        elif hasattr(module, "register_quote_stickers"):
+            module.register_quote_stickers(user, is_authorized_cb=is_authorized)
+            success = True
+
+        if success:
+            LOADED_MODULES[module_name] = module
             logging.info(f"🧩 Модуль [{module_name}] успешно подключен.")
             return True
 
-        # 2. Совместимость с Media Studio и Quote Stickers
-        elif hasattr(module, "register_media_studio"):
-            module.register_media_studio(user, is_authorized_cb=is_authorized)
-            logging.info(f"🎛️ Media Studio [{module_name}] подключена.")
-            return True
-        elif hasattr(module, "register_quote_stickers"):
-            module.register_quote_stickers(user, is_authorized_cb=is_authorized)
-            logging.info(f"✨ Quote Stickers [{module_name}] подключен.")
-            return True
-        else:
-            logging.warning(f"⚠️ В модуле [{module_name}] нет функции register(user).")
-            return False
-
-    except Exception as e:
-        logging.error(f"❌ Ошибка загрузки модуля [{module_name}]: {e}")
         return False
 
+    except ModuleNotFoundError as e:
+        logging.warning(f"⏳ Модуль [{module_name}] ожидает фоновые либы ({e.name})...")
+        if file_path not in PENDING_MODULES:
+            PENDING_MODULES.append(file_path)
+        return False
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка в модуле [{module_name}]: {e}")
+        return False
+
+async def background_modules_watcher(user, bot=None):
+    """Фоновый воркер: как только pip докачает OpenCV, модуль подхватится сам"""
+    await asyncio.sleep(4)
+    retries = 30
+
+    while PENDING_MODULES and retries > 0:
+        await asyncio.sleep(5)
+        retries -= 1
+
+        for file_path in list(PENDING_MODULES):
+            if load_single_module(file_path, user, bot):
+                PENDING_MODULES.remove(file_path)
+                m_name = os.path.splitext(os.path.basename(file_path))[0]
+                logging.info(f"🎉 Фоновый модуль [{m_name}] успешно подхвачен на лету!")
+
 def load_all_modules(user, bot=None):
-    """Сканирование всей папки modules/"""
+    """Первичная загрузка всех модулей"""
     if not os.path.exists(MODULES_DIR):
         os.makedirs(MODULES_DIR)
         return
@@ -61,10 +96,37 @@ def load_all_modules(user, bot=None):
     for f in files:
         if load_single_module(f, user, bot):
             loaded += 1
-    logging.info(f"🚀 Всего загружено модулей: {loaded}")
+
+    logging.info(f"🚀 Сходу запущено модулей: {loaded}")
+
+    if PENDING_MODULES:
+        asyncio.create_task(background_modules_watcher(user, bot))
 
 def init_hot_reload(user, bot=None):
-    """Регистрация команды sudo load для загрузки модулей на лету"""
+    """Команды: sudo reload и sudo load"""
+    @user.on(events.NewMessage(pattern=r"^sudo\s+(reload|релоад)(\s+.*)?$"))
+    async def reload_handler(event):
+        if not await is_authorized(event):
+            return
+
+        parts = event.raw_text.split()
+        target = parts[1].lower() if len(parts) > 1 else ""
+
+        if not target or target in ["all", "все"]:
+            load_all_modules(user, bot)
+            return await event.reply("🔄 Все модули из папки `modules/` перезагружены!")
+
+        target_name = target.replace(".py", "")
+        file_path = os.path.join(MODULES_DIR, f"{target_name}.py")
+
+        if not os.path.exists(file_path):
+            return await event.reply(f"❌ Файл `modules/{target_name}.py` не найден.")
+
+        if load_single_module(file_path, user, bot):
+            await event.reply(f"✅ Модуль `{target_name}` успешно перезагружен в памяти!")
+        else:
+            await event.reply(f"⚠️ Ошибка перезагрузки `{target_name}`. Проверь логи: `sudo лог`")
+
     @user.on(events.NewMessage(pattern=r"^sudo\s+(load|загрузить)$"))
     async def load_module_handler(event):
         if not await is_authorized(event):
@@ -90,17 +152,13 @@ def init_hot_reload(user, bot=None):
         save_path = os.path.join(MODULES_DIR, file_name)
 
         try:
-            # 1. Скачиваем прямо в modules/
             await user.download_media(target, file_name=save_path)
-
-            # 2. Внедряем в рантайм
             success = load_single_module(save_path, user, bot)
             if not success:
-                return await status.edit(f"⚠️ Модуль скачан, но не найден метод `register(user)`.")
+                return await status.edit(f"⚠️ Модуль скачан, но не найден метод регистрации.")
 
             await status.edit(f"✅ Модуль `{file_name[:-3]}` **активен без перезагрузки**!")
 
-            # 3. Авто-пуш в GitHub
             subprocess.run([
                 "bash", "-c",
                 f'git config user.name "github-actions[bot]" && '
@@ -109,7 +167,7 @@ def init_hot_reload(user, bot=None):
                 f'git commit -m "feat: auto-add module {file_name[:-3]} [skip ci]" && '
                 f'git push'
             ])
-            logging.info(f"Модуль {file_name} успешно сохранен в Git.")
+            logging.info(f"Модуль {file_name} сохранен в Git.")
 
         except Exception as e:
             logging.error(f"Ошибка Hot-Reload: {e}")
