@@ -1,4 +1,4 @@
-name: LEX Sniper Userbot
+name: 🪐 Proxima Centauri Userbot
 
 on:
   schedule:
@@ -22,29 +22,42 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Install System Packages (FFmpeg)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip' # Автоматический кэш пакетов от GitHub
 
-      - name: Install Python Dependencies
+      # Ставим ТОЛЬКО ядро за 2 секунды, чтобы бот не ждал
+      - name: Fast Install Core Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install telethon rlottie-python pillow opencv-python-headless numpy requests pilmoji
+          pip install telethon
 
-      - name: Run Userbot with Auto-Relay
+      - name: Run Userbot with Parallel Heavy Install
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           SESSION_STRING: ${{ secrets.SESSION_STRING }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 1. ЗАПУСК ТЯЖЕЛЫХ БИБЛИОТЕК И FFMPEG В ФОНЕ ЧЕРЕЗ &
+          (
+            echo "⚡ [ФОН] Начинаю быструю загрузку статического FFmpeg..."
+            wget -q https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+            tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz
+            sudo mv ffmpeg-master-latest-linux64-gpl/bin/* /usr/local/bin/
+            rm -rf ffmpeg-master-*
+            echo "🎬 [ФОН] FFmpeg готов!"
+
+            echo "📦 [ФОН] Устанавливаю тяжелые Python пакеты (OpenCV, Pillow, Lottie)..."
+            pip install rlottie-python pillow opencv-python-headless numpy requests pilmoji
+            echo "🎉 [ФОН] Все тяжелые библиотеки успешно установлены!"
+          ) &
+
+          # 2. МГНОВЕННЫЙ СТАРТ ЮЗЕРБОТА В ПЕРЕДНЕМ ПЛАНЕ
           timeout 20400s python app.py || true
 
           echo "⏳ Время смены караула (5ч 40м вышло). Запускаем следующий цикл..."
-          gh workflow run "LEX Sniper Userbot" --ref main
+          gh workflow run "🪐 Proxima Centauri Userbot" --ref main
