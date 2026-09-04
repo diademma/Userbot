@@ -27,13 +27,13 @@ jobs:
         with:
           python-version: '3.10'
 
-      # АВТОМАТИЧЕСКИЙ КЭШ FFMPEG: при повторных запусках восстановится за 0.5 секунды!
+      # КЭШ В ДОМАШНЕЙ ПАПКЕ (без проблем с root-правами)
       - name: Cache FFmpeg Binary
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: /usr/local/bin/ffmpeg
-          key: ${{ runner.os }}-ffmpeg-static-v1
+          path: ~/.local/bin/ffmpeg
+          key: ${{ runner.os }}-ffmpeg-home-v1
 
       # Быстрый старт ядра
       - name: Fast Install Core
@@ -50,16 +50,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           (
-            # ПРОВЕРКА: качаем FFmpeg только если его нет в кэше!
-            if ! command -v ffmpeg &> /dev/null; then
-              echo "⚡ [ФОН] Скачиваю FFmpeg (сохранится в кэш гитхаба)..."
+            mkdir -p ~/.local/bin
+
+            # Проверяем наличие бинарника в ~/.local/bin
+            if [ ! -f ~/.local/bin/ffmpeg ]; then
+              echo "⚡ [ФОН] Скачиваю FFmpeg (сохранится в кэш)..."
               wget -q https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
               tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz
-              sudo mv ffmpeg-master-latest-linux64-gpl/bin/* /usr/local/bin/
+              mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg ~/.local/bin/
+              chmod +x ~/.local/bin/ffmpeg
               rm -rf ffmpeg-master-*
-              echo "🎬 [ФОН] FFmpeg успешно сохранен в кэш!"
+              echo "🎬 [ФОН] FFmpeg готов и ждет финальной записи в кэш!"
             else
-              echo "🎬 [ФОН] FFmpeg взят из кэша за доли секунды!"
+              echo "🎬 [ФОН] FFmpeg мгновенно взят из кэша!"
             fi
 
             echo "📦 [ФОН] Устанавливаю OpenCV, Pillow, Lottie и др..."
