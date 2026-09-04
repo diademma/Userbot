@@ -13,24 +13,28 @@ from core.db import is_authorized
 
 MODULES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "modules"))
 
-# Реестры состояния
 LOADED_MODULES = {}
 PENDING_MODULES = []
-WAITING_NOTIFICATIONS = []  # Сообщения пользователю, которые ждут смены на "Все ресурсы загружены"
+WAITING_NOTIFICATIONS = []
 
 def get_loaded_modules():
-    """Возвращает словарь загруженных модулей"""
     return LOADED_MODULES
 
 def get_pending_modules():
-    """Возвращает список имен модулей, которые еще ждут либы"""
     return [os.path.splitext(os.path.basename(p))[0] for p in PENDING_MODULES]
 
 def load_single_module(file_path: str, user, bot=None, silent: bool = False) -> bool:
-    """Загрузка модуля. Если silent=True — не спамит в логи при ожидании"""
+    """Загрузка модуля с очисткой кэша импортов"""
     module_name = os.path.splitext(os.path.basename(file_path))[0]
     if module_name.startswith("_"):
         return False
+
+    # Сбрасываем кэш файловой системы Python, чтобы он увидел новые библиотеки от pip
+    importlib.invalidate_caches()
+
+    # Очищаем битый модуль из памяти перед новой попыткой
+    if module_name in sys.modules and not hasattr(sys.modules[module_name], "register") and not hasattr(sys.modules[module_name], "register_quote_stickers"):
+        sys.modules.pop(module_name, None)
 
     try:
         if module_name in sys.modules:
@@ -65,48 +69,57 @@ def load_single_module(file_path: str, user, bot=None, silent: bool = False) -> 
 
         return False
 
-    except ModuleNotFoundError:
-        # Если тихий режим выключен (первый запуск) — добавляем в очередь
+    except ModuleNotFoundError as e:
+        # Удаляем недогруженный модуль, чтобы он не висел зомби в памяти
+        sys.modules.pop(module_name, None)
         if file_path not in PENDING_MODULES:
             PENDING_MODULES.append(file_path)
             if not silent:
-                logging.info(f"⏳ Модуль [{module_name}] поставлен в очередь (ждет фоновые либы)...")
+                logging.info(f"⏳ Модуль [{module_name}] ожидает либу: {e.name}")
         return False
 
     except Exception as e:
+        sys.modules.pop(module_name, None)
         logging.error(f"❌ Ошибка в модуле [{module_name}]: {e}")
         return False
 
 async def background_modules_watcher(user, bot=None):
-    """Тихий фоновый наблюдатель: ждет завершения pip без спама в логи"""
+    """Фоновый воркер: периодически проверяет появление фоновых либ"""
     await asyncio.sleep(4)
-    retries = 35  # Проверяем в течение ~2.5 минут
+    retries = 35  # Ожидаем максимум ~2.5 минуты
 
     while PENDING_MODULES and retries > 0:
         await asyncio.sleep(4)
         retries -= 1
 
         for file_path in list(PENDING_MODULES):
-            # Проверяем тихо (silent=True), чтобы не засорять консоль
             if load_single_module(file_path, user, bot, silent=True):
                 PENDING_MODULES.remove(file_path)
                 m_name = os.path.splitext(os.path.basename(file_path))[0]
                 logging.info(f"🎉 Фоновый модуль [{m_name}] успешно подхвачен на лету!")
 
-    # МАРКЕР: Срабатывает один раз, когда все фоновые ресурсы загрузились
+    # СРАБАТЫВАНИЕ МАРКЕРА
     if not PENDING_MODULES:
-        logging.info("✅ Все фоновые библиотеки и модули загружены!")
-
-        # Редактируем все смс, где бот просил пользователя подождать
+        logging.info("✅ Все фоновые библиотеки и модули успешно загружены!")
         while WAITING_NOTIFICATIONS:
             msg = WAITING_NOTIFICATIONS.pop(0)
             try:
-                await msg.edit("✅ Все ресурсы загружены!")
+                await msg.edit("✅ Все ресурсы загружены! Можете использовать команду.")
+            except Exception:
+                pass
+    else:
+        # Если время вышло, а модуль так и не смог встать
+        failed = [os.path.splitext(os.path.basename(p))[0] for p in PENDING_MODULES]
+        logging.error(f"⚠️ Не удалось дождаться либ для модулей: {failed}")
+        while WAITING_NOTIFICATIONS:
+            msg = WAITING_NOTIFICATIONS.pop(0)
+            try:
+                await msg.edit(f"❌ Не удалось загрузить ресурсы для модулей: `{', '.join(failed)}`")
             except Exception:
                 pass
 
 def load_all_modules(user, bot=None):
-    """Стартовая загрузка при запуске ядра"""
+    """Стартовая загрузка при запуске"""
     if not os.path.exists(MODULES_DIR):
         os.makedirs(MODULES_DIR)
         return
@@ -119,14 +132,12 @@ def load_all_modules(user, bot=None):
 
     logging.info(f"🚀 Сходу запущено модулей: {loaded}")
 
-    # Если есть модули в ожидании — запускаем тихий фоновый воркер
     if PENDING_MODULES:
         asyncio.create_task(background_modules_watcher(user, bot))
 
 def init_hot_reload(user, bot=None):
-    """Регистрация команд reload, load и перехватчика ранних запросов"""
+    """Команды: reload, load и перехватчик ранних запросов"""
 
-    # 1. ПЕРЕХВАТЧИК РАННИХ КОМАНД
     @user.on(events.NewMessage(pattern=r"^sudo\s+(.+)"))
     async def early_command_interceptor(event):
         if not await is_authorized(event):
@@ -135,7 +146,6 @@ def init_hot_reload(user, bot=None):
         parts = event.raw_text.split()
         cmd = parts[1].lower() if len(parts) > 1 else ""
 
-        # Список команд, которые уже умеет обрабатывать Sniper (не перехватываем их)
         base_cmds = [
             "спам", "ad", "реклама", "бан", "+искл", "-искл", "исклы", 
             "+бан", "-бан", "баны", "+рег", "-рег", "регексы", "+дов", 
@@ -144,14 +154,12 @@ def init_hot_reload(user, bot=None):
         ]
 
         if cmd in base_cmds:
-            return  # Передаем управление дальше модулю Sniper
+            return
 
-        # Если пользователь вызвал команду модуля, который еще в процессе фоновой установки
         if PENDING_MODULES:
             wait_msg = await event.reply("⏳ Подождите немного, загружаю ресурсы...")
             WAITING_NOTIFICATIONS.append(wait_msg)
 
-    # 2. РЕЛОАД МОДУЛЕЙ
     @user.on(events.NewMessage(pattern=r"^sudo\s+(reload|релоад)(\s+.*)?$"))
     async def reload_handler(event):
         if not await is_authorized(event):
@@ -175,7 +183,6 @@ def init_hot_reload(user, bot=None):
         else:
             await event.reply(f"⚠️ Ошибка перезагрузки `{target_name}`. Проверь логи: `sudo лог`")
 
-    # 3. ЗАГРУЗКА НОВОГО МОДУЛЯ
     @user.on(events.NewMessage(pattern=r"^sudo\s+(load|загрузить)$"))
     async def load_module_handler(event):
         if not await is_authorized(event):
