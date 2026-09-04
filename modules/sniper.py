@@ -153,14 +153,12 @@ async def delete_after(event, delay: int, label: str):
     except Exception as e:
         logging.warning(f"Ошибка удаления: {e}")
 
-# --- ФУНКЦИЯ РЕГИСТРАЦИИ МОДУЛЯ ---
 def register(client):
     @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
     async def sniper_chat_handler(event):
         msg = event.message
         text = (msg.raw_text or "").strip()
-        
-        # Игнорируем команды sudo и точки
+
         if text.lower().startswith("sudo") or text.startswith("."):
             return
 
@@ -173,7 +171,6 @@ def register(client):
 
         is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
 
-        # 1. Люди
         if not is_bot:
             for pattern, delay in db_get_human_regex():
                 try:
@@ -184,7 +181,6 @@ def register(client):
                 except re.error: pass
             return
 
-        # 2. Боты
         is_tracked, bot_tag = identify_tracked_bot(sender)
         if not is_tracked: return
 
@@ -205,37 +201,13 @@ def register(client):
             logging.info(f"📋 [{bot_tag}] Инфо / меню / топ -> Удаление через {delay}с")
             asyncio.create_task(delete_after(event, delay, f"Инфо [{bot_tag}]"))
 
-    @client.on(events.NewMessage(pattern=r"^sudo(\s.*|$)"))
+    @client.on(events.NewMessage(pattern=r"^sudo\s+(.+)"))
     async def sniper_sudo_handler(event):
         if not await is_authorized(event): return
 
         parts = event.raw_text.split()
         cmd = parts[1].lower() if len(parts) > 1 else ""
         val = " ".join(parts[2:]) if len(parts) > 2 else ""
-
-        if not cmd:
-            rp_t = db_get_timer('rp_delay', 10)
-            info_t = db_get_timer('info_delay', 30)
-            help_text = (
-                f"🪐 **{USERBOT_NAME} {VERSION} — Панель управления**\n\n"
-                "🎛️ **Медиа и Стикеры:**\n"
-                "• `sudo медиа` — Меню Media Studio\n"
-                "• `sudo цитата` — Создать 3D-стикер цитату\n\n"
-                "🚨 **Реклама:**\n"
-                "• `sudo спам` *(в реплай)* — Снести рекламу и обучить фильтр\n\n"
-                "🛡️ **Исключения:**\n"
-                "• `sudo +искл {фраза}` / `sudo -искл {фраза}` / `sudo исклы`\n\n"
-                "🚫 **Банворды:**\n"
-                "• `sudo +бан {фраза} [сек]` / `sudo -бан {фраза}` / `sudo баны`\n\n"
-                "🧹 **Регексы (Люди):**\n"
-                "• `sudo +рег {паттерн} [сек]` / `sudo -рег {паттерн}` / `sudo регексы`\n\n"
-                "👥 **Доверенные:**\n"
-                "• `sudo +дов` / `sudo -дов` / `sudo доверенные`\n\n"
-                "⏱️ **Таймеры:**\n"
-                f"• `sudo рп {rp_t}` *(сейчас: {rp_t}с)* | `sudo инфо {info_t}` *(сейчас: {info_t}с)*\n"
-                "• `sudo лог` — Посмотреть последние события"
-            )
-            return await event.reply(help_text)
 
         try:
             if cmd in ["спам", "ad", "реклама", "бан"]:
