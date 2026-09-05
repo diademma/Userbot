@@ -5,16 +5,14 @@ import binascii
 import logging
 from telethon import events, Button
 from telethon.tl.types import InputBotInlineResult, InputBotInlineMessageText
-from telethon.tl.functions.messages import EditInlineBotMessageRequest
+from telethon.errors import MessageNotModifiedError
 from core.config import USERBOT_NAME, OWNER_ID
 from core.db import is_authorized, mem_logs, db_get_timer, db_get_trusted, db_get_exceptions
 from core.loader import get_loaded_modules, get_pending_modules
 
-# Прямая ссылка на баннер
 HEADER_BANNER_URL = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
 START_TIME = time.time()
 
-# Строгие символы (без эмодзи)
 MODULE_TITLES = {
     "sniper": "⌖ Sniper & Guard",
     "media_studio": "▷ Media Studio",
@@ -87,20 +85,21 @@ def build_modules_keyboard():
     return buttons
 
 async def safe_edit(event, bot, text, buttons):
-    """Жесткое редактирование сообщения через Raw API для гарантии invert_media"""
-    parsed_text, entities = await bot._parse_message_text(text, 'html')
+    """Безопасное редактирование с подавлением спама в логах"""
     try:
-        await bot(EditInlineBotMessageRequest(
-            id=event.inline_message_id,
-            message=parsed_text,
-            no_webpage=False,
-            invert_media=True,
-            entities=entities,
-            reply_markup=bot.build_reply_markup(buttons)
-        ))
+        await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True, invert_media=True)
+    except MessageNotModifiedError:
+        pass  # Всё в порядке, текст просто не изменился
+    except TypeError:
+        # Для старых версий Telethon, которые не поддерживают invert_media в edit()
+        try:
+            await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True)
+        except MessageNotModifiedError:
+            pass
     except Exception as e:
-        logging.error(f"Raw edit error: {e}")
-        await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True)
+        # Игнорируем внутренние сбои Телеграма
+        if "Telegram is having internal issues" not in str(e):
+            logging.error(f"Ошибка редактирования меню: {e}")
 
 def init_inline(user, bot):
     if not bot:
@@ -117,7 +116,6 @@ def init_inline(user, bot):
         ping_ms = (time.perf_counter() - start) * 1000
         uptime = get_uptime_str()
 
-        # Чистая ссылка без цитаты + ультра-жирный юникод 𝗣𝗿𝗼𝘅𝗶𝗺𝗮 сразу под фото
         banner = f'<a href="{HEADER_BANNER_URL}">&#8205;</a>'
         text = (
             f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
@@ -125,7 +123,6 @@ def init_inline(user, bot):
             f'• Время работы: {uptime}</blockquote>'
         )
 
-        # Жесткая ручная сборка MTProto-ответа
         parsed_text, entities = await bot._parse_message_text(text, 'html')
         send_msg = InputBotInlineMessageText(
             message=parsed_text,
