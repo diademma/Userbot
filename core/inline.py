@@ -7,13 +7,13 @@ from core.config import USERBOT_NAME, OWNER_ID
 from core.db import is_authorized, mem_logs, db_get_timer, db_get_trusted, db_get_exceptions
 from core.loader import get_loaded_modules, get_pending_modules
 
-# Прямая Raw-ссылка на баннер в твоем репозитории
+# Прямая ссылка на баннер в репозитории
 HEADER_BANNER_URL = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
 
 # Фиксация времени старта ядра
 START_TIME = time.time()
 
-# Чистые технические глифы (не имеют эмодзи-версий)
+# Строгие символы без цветных эмодзи
 MODULE_TITLES = {
     "sniper": "⌖ Sniper & Guard",
     "media_studio": "▷ Media Studio",
@@ -29,7 +29,7 @@ def get_uptime_str() -> str:
     return f"{hours:02d} : {minutes:02d} : {seconds:02d}"
 
 def get_ram_usage() -> str:
-    """Расчет оперативной памяти строго в понятных процентах"""
+    """Расчет оперативной памяти строго в процентах"""
     try:
         import resource
         proc_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -97,17 +97,20 @@ def build_modules_keyboard():
     return buttons
 
 async def safe_edit(event, text, buttons):
-    """Редактирование сообщения с размещением фото строго НАД текстом"""
+    """Редактирование сообщения с принудительным переносом превью наверх"""
     try:
         await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True, invert_media=True)
     except Exception:
-        await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True)
+        try:
+            await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True)
+        except Exception:
+            await event.edit(text, buttons=buttons, parse_mode="html")
 
 def init_inline(user, bot):
     if not bot:
         return
 
-    # --- 1. ГЛАВНОЕ МЕНЮ (ФОТО СВЕРХУ, БЕЗ КУРСИВА И БЕЗ ПУСТЫХ СТРОК В ЦИТАТЕ) ---
+    # --- 1. ГЛАВНОЕ МЕНЮ (КАК В ХЕРОКУ: MEDIA_QUOTE + INVERT_MEDIA) ---
     @bot.on(events.InlineQuery)
     async def inline_query_handler(event):
         user_me = await user.get_me()
@@ -121,41 +124,53 @@ def init_inline(user, bot):
         ping_ms = (time.perf_counter() - start) * 1000
         uptime = get_uptime_str()
 
-        # Невидимая ссылка на фото
-        banner = f'<a href="{HEADER_BANNER_URL}">&#8205;</a>'
+        # ФОКУС ХЕРОКУ: Ссылка обернута в blockquote, давая цитатную полосу на фото!
+        banner = f'<blockquote><a href="{HEADER_BANNER_URL}">&#8205;</a></blockquote>'
 
-        # Чистый Bold + цитата без начального \n (строка начинается сразу)
+        # Чистый Bold + цитата начинается сразу с первой строки без \n
         text = (
-            f"{banner}<b>Proxima UB</b>\n\n"
+            f"{banner}"
+            f"<b>Proxima UB</b>\n\n"
             f"инфо:\n"
             f"<blockquote expandable>• Пинг: {ping_ms:.3f} мс\n"
             f"• Время работы: {uptime}</blockquote>"
         )
 
-        result = builder.article(
-            title="Proxima UB",
-            text=text,
-            buttons=build_home_keyboard(),
-            parse_mode="html",
-            link_preview=True
-        )
+        try:
+            result = builder.article(
+                title="Proxima UB",
+                text=text,
+                buttons=build_home_keyboard(),
+                parse_mode="html",
+                link_preview=True,
+                invert_media=True
+            )
+        except TypeError:
+            result = builder.article(
+                title="Proxima UB",
+                text=text,
+                buttons=build_home_keyboard(),
+                parse_mode="html",
+                link_preview=True
+            )
 
-        # Пробиваемся к TL-объекту и включаем перенос фото наверх
-        if hasattr(result, "result") and hasattr(result.result, "send_message"):
-            result.result.send_message.invert_media = True
-        elif hasattr(result, "send_message"):
+        # ПРИНУДИТЕЛЬНО ВЫСТАВЛЯЕМ ФЛАГ НА УРОВНЕ MTPROTO
+        target_msg = getattr(result, "result", result)
+        if hasattr(target_msg, "send_message") and hasattr(target_msg.send_message, "invert_media"):
+            target_msg.send_message.invert_media = True
+        elif hasattr(result, "send_message") and hasattr(result.send_message, "invert_media"):
             result.send_message.invert_media = True
 
         await event.answer([result], cache_time=1)
 
-    # --- 2. ОБРАБОТЧИК КЛИКОВ ПО КНОПКАМ ---
+    # --- 2. ОБРАБОТЧИК НАЖАТИЙ НА КНОПКИ ---
     @bot.on(events.CallbackQuery)
     async def callback_handler(event):
         if event.sender_id != OWNER_ID:
             return await event.answer("Доступ ограничен.", alert=True)
 
         data = event.data.decode("utf-8")
-        banner = f'<a href="{HEADER_BANNER_URL}">&#8205;</a>'
+        banner = f'<blockquote><a href="{HEADER_BANNER_URL}">&#8205;</a></blockquote>'
 
         # ГЛАВНЫЙ ЭКРАН (ВОЗВРАТ)
         if data == "menu_main":
@@ -165,7 +180,8 @@ def init_inline(user, bot):
             uptime = get_uptime_str()
 
             text = (
-                f"{banner}<b>Proxima UB</b>\n\n"
+                f"{banner}"
+                f"<b>Proxima UB</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Пинг: {ping_ms:.3f} мс\n"
                 f"• Время работы: {uptime}</blockquote>"
@@ -176,7 +192,8 @@ def init_inline(user, bot):
         elif data == "menu_modules":
             loaded = get_loaded_modules()
             text = (
-                f"{banner}<b>Proxima UB — Модули</b>\n\n"
+                f"{banner}"
+                f"<b>Proxima UB — Модули</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Активно компонентов: {len(loaded)}\n"
                 f"• Состояние: все ядра в норме</blockquote>\n\n"
@@ -194,7 +211,8 @@ def init_inline(user, bot):
             cpu = get_cpu_load()
 
             text = (
-                f"{banner}<b>Proxima UB — Система</b>\n\n"
+                f"{banner}"
+                f"<b>Proxima UB — Система</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Сервер: GitHub Actions (Ubuntu)\n"
                 f"• Пинг сети: {ping_ms:.3f} мс\n"
@@ -211,7 +229,8 @@ def init_inline(user, bot):
         # 3. РАЗДЕЛ: НАСТРОЙКИ
         elif data == "menu_settings":
             text = (
-                f"{banner}<b>Proxima UB — Настройки</b>\n\n"
+                f"{banner}"
+                f"<b>Proxima UB — Настройки</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Раздел в активной разработке\n"
                 f"• Параметры ядра появятся позже</blockquote>"
@@ -223,7 +242,8 @@ def init_inline(user, bot):
             logs = mem_logs.get_logs(12)
             log_text = "\n".join(logs) if logs else "Журнал пуст."
             text = (
-                f"{banner}<b>Proxima UB — Логи ядра</b>\n\n"
+                f"{banner}"
+                f"<b>Proxima UB — Логи ядра</b>\n\n"
                 f"<pre>{log_text}</pre>"
             )
             btns = [
@@ -236,7 +256,8 @@ def init_inline(user, bot):
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f"{banner}<b>Sniper & Guard</b>\n\n"
+                f"{banner}"
+                f"<b>Sniper & Guard</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Фильтрация рекламы: активна\n"
                 f"• Задержка РП: {rp_t} с\n"
@@ -254,7 +275,8 @@ def init_inline(user, bot):
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f"{banner}<b>Параметры таймеров</b>\n\n"
+                f"{banner}"
+                f"<b>Параметры таймеров</b>\n\n"
                 f"<blockquote expandable>• РП ботов: {rp_t} с (sudo рп [сек])\n"
                 f"• Длинные инфо: {info_t} с (sudo инфо [сек])</blockquote>"
             )
@@ -275,7 +297,8 @@ def init_inline(user, bot):
         # ПОДМЕНЮ: MEDIA STUDIO
         elif data == "open_mod_media_studio":
             text = (
-                f"{banner}<b>Media Studio</b>\n\n"
+                f"{banner}"
+                f"<b>Media Studio</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Движок: статический FFmpeg\n"
                 f"• Поддержка: GIF, видео-кружки, аудио</blockquote>\n\n"
@@ -286,7 +309,8 @@ def init_inline(user, bot):
         # ПОДМЕНЮ: QUOTE STICKERS
         elif data == "open_mod_quote_stickers":
             text = (
-                f"{banner}<b>Quote Stickers</b>\n\n"
+                f"{banner}"
+                f"<b>Quote Stickers</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Рендер: 3D цитаты-стикеры\n"
                 f"• Либы: OpenCV, Lottie, Pillow</blockquote>\n\n"
@@ -298,7 +322,8 @@ def init_inline(user, bot):
         elif data.startswith("open_mod_"):
             mod_name = data.replace("open_mod_", "")
             text = (
-                f"{banner}<b>Модуль: {mod_name}</b>\n\n"
+                f"{banner}"
+                f"<b>Модуль: {mod_name}</b>\n\n"
                 f"инфо:\n"
                 f"<blockquote expandable>• Статус: загружен в оперативную память\n"
                 f"• Доступен через команды в чате</blockquote>"
