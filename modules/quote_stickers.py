@@ -1,4 +1,4 @@
-# quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.6 (Apple Emojis + Big Font Scaling)
+# modules/quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.7 (API Compliant)
 import os
 import re
 import time
@@ -32,12 +32,26 @@ from telethon.tl.types import (
     InputStickerSetEmpty
 )
 
+from core.config import OWNER_ID, DB_NAME
+from core.db import is_authorized
+
+# --- ОБЯЗАТЕЛЬНЫЕ МЕТАДАННЫЕ API ДЛЯ ЯДРА ---
+TITLE = "❝ Quote Stickers"
+BANNER = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
+COMMANDS = (
+    "• sudo цитата [текст] — Создать 3D-видеостикер\n"
+    "• sudo цитата (в реплай) — Взять текст из сообщения\n"
+    "• sudo цитата [1|2] [текст] — Выбор шаблона:\n"
+    "  └ 1: Девочка в желтой шапке с блокнотом\n"
+    "  └ 2: Девочка разворачивает рисунок\n\n"
+    "⚙️ ПАРАМЕТРЫ И ОГРАНИЧЕНИЯ:\n"
+    "• Лимит длины: до 45 символов (для крупного шрифта)\n"
+)
+
 LOGGER = logging.getLogger("QuoteStickers")
 
-OWNER_ID = 5421909121
 TARGET_CHAT_ID = -1002281822286
 DAILY_LIMIT = 3
-DB_NAME = "sniper_memory_v3.db"
 MAX_CHAR_LIMIT = 45
 
 # Надежные источники красивых жирных кириллических маркеров
@@ -157,7 +171,7 @@ def make_background_transparent(frame_bgra):
     frame_bgra[outer_bg, 3] = 0
     return frame_bgra
 
-# --- ДИНАМИЧЕСКИЙ РАСЧЕТ И РЕНДЕР ТЕКСТА (КРУПНО ДЛЯ МАЛОГО ЧИСЛА СЛОВ) ---
+# --- ДИНАМИЧЕСКИЙ РАСЧЕТ И РЕНДЕР ТЕКСТА ---
 def render_text_plate(text: str, card_w=400, card_h=300):
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -165,13 +179,11 @@ def render_text_plate(text: str, card_w=400, card_h=300):
 
     words = text.split()
     
-    # Минимальные отступы для максимального покрытия площади
     pad_x = 22
     pad_y = 18
-    avail_w = card_w - (pad_x * 2) # 356px
-    avail_h = card_h - (pad_y * 2) # 264px
+    avail_w = card_w - (pad_x * 2)
+    avail_h = card_h - (pad_y * 2)
 
-    # Начинаем с огромного размера шрифта!
     font_size = 160
     best_lines = []
     best_font = None
@@ -199,7 +211,6 @@ def render_text_plate(text: str, card_w=400, card_h=300):
             else:
                 if curr:
                     lines.append(curr)
-                # Проверяем, влезает ли само слово отдельно
                 w_single_len = draw.textbbox((0, 0), w, font=font)[2] - draw.textbbox((0, 0), w, font=font)[0]
                 if w_single_len > avail_w:
                     fits = False
@@ -228,8 +239,7 @@ def render_text_plate(text: str, card_w=400, card_h=300):
     total_h = len(best_lines) * line_h
     start_y = pad_y + (avail_h - total_h) / 2
 
-    # Рендеринг с Apple Emojis
-    text_color = (195, 25, 45, 255) # Насыщенный фломастерный красный
+    text_color = (195, 25, 45, 255) # Насыщенный маркерный красный
 
     if HAS_PILMOJI:
         with Pilmoji(img, source=AppleEmojiSource) as pilmoji:
@@ -304,10 +314,8 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         if frame.shape[2] == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
 
-        # 1. Удаляем внешний белый фон
         frame = make_background_transparent(frame)
 
-        # 2. Накладываем 3D-текст
         if start_t <= cur_t <= end_t:
             if is_static:
                 dst_pts = cfg["pose_1"]["corners"]
@@ -326,11 +334,9 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
                     dst_pts = (p1["corners"] + (p2["corners"] - p1["corners"]) * f).astype(np.float32)
                     fingers = p2["fingers"] if f > 0.5 else p1["fingers"]
 
-            # 3D-гомография
             M = cv2.getPerspectiveTransform(src_pts, dst_pts)
             warped = cv2.warpPerspective(text_plate, M, (512, 512), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
-            # Вырез пальчиков поверх текста
             if len(fingers) >= 3:
                 f_mask = np.zeros((512, 512), dtype=np.uint8)
                 cv2.fillPoly(f_mask, [fingers], 255)
@@ -359,9 +365,9 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
     return os.path.exists(output_file) and os.path.getsize(output_file) > 1000
 
 # =========================================================================
-# РЕГИСТРАЦИЯ ДЛЯ TELETHON
+# ТОЧКА ВХОДА (НОВЫЙ СТАНДАРТ API)
 # =========================================================================
-def register_quote_stickers(client, is_authorized_cb=None):
+def register(client, bot=None):
     init_db()
 
     async def check_access(event, consume_quota=False) -> tuple[bool, str]:
@@ -370,9 +376,7 @@ def register_quote_stickers(client, is_authorized_cb=None):
         if not sid:
             return False, "Неизвестный отправитель."
 
-        if sid == OWNER_ID:
-            return True, "unlimited"
-        if is_authorized_cb and await is_authorized_cb(event):
+        if sid == OWNER_ID or await is_authorized(event):
             return True, "unlimited"
 
         if cid == TARGET_CHAT_ID:
@@ -444,3 +448,6 @@ def register_quote_stickers(client, is_authorized_cb=None):
                 attributes=custom_attributes
             )
             await status.delete()
+
+# Обратная совместимость для старых ссылок
+register_quote_stickers = register
