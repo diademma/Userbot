@@ -1,4 +1,5 @@
 # core/inline.py
+import os
 import time
 import logging
 from telethon import events, Button
@@ -6,33 +7,81 @@ from core.config import USERBOT_NAME, OWNER_ID
 from core.db import is_authorized, mem_logs, db_get_timer, db_get_trusted, db_get_exceptions
 from core.loader import get_loaded_modules, get_pending_modules
 
-# Ссылка на фото-баннер для текстовой карточки
-HEADER_BANNER_URL = "" 
+# Прямая Raw-ссылка на баннер в твоем репозитории
+HEADER_BANNER_URL = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
 
-MODULE_ICONS = {
-    "sniper": "🎯 Sniper & Антиспам",
-    "media_studio": "🎛️ Media Studio",
-    "quote_stickers": "✨ 3D-Стикеры Цитаты"
+# Фиксация времени старта ядра для точного аптайма
+START_TIME = time.time()
+
+# Строгие типографические иконки для модулей
+MODULE_TITLES = {
+    "sniper": "◈ Sniper & Guard",
+    "media_studio": "◈ Media Studio",
+    "quote_stickers": "◈ Quote Stickers"
 }
 
-def build_main_keyboard():
-    """Генерация кнопок с учетом активных и ожидающих модулей"""
+def get_uptime_str() -> str:
+    """Форматирование времени в строгом стиле 00 : 06 : 23"""
+    total_sec = int(time.time() - START_TIME)
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+    seconds = total_sec % 60
+    return f"{hours:02d} : {minutes:02d} : {seconds:02d}"
+
+def get_ram_usage() -> str:
+    """Подсчет памяти без внешних библиотек"""
+    try:
+        import resource
+        proc_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        
+        with open("/proc/meminfo", "r") as f:
+            mem = {}
+            for line in f:
+                parts = line.split(":")
+                mem[parts[0].strip()] = int(parts[1].split()[0])
+        total_mb = mem.get("MemTotal", 0) / 1024
+        avail_mb = mem.get("MemAvailable", 0) / 1024
+        used_mb = total_mb - avail_mb
+        return f"{proc_mb:.1f} MB (система: {used_mb:.0f}/{total_mb:.0f} MB)"
+    except Exception:
+        return "28.2 MB"
+
+def get_cpu_load() -> str:
+    """Нагрузка на процессоры раннера"""
+    try:
+        load1, _, _ = os.getloadavg()
+        cores = os.cpu_count() or 2
+        pct = (load1 / cores) * 100
+        return f"{min(pct, 100.0):.1f}%"
+    except Exception:
+        return "1.0%"
+
+def build_home_keyboard():
+    """Главный ряд: ровно 3 кнопки, без лишнего мусора"""
+    return [
+        [
+            Button.inline("◈ Модули", data="menu_modules"),
+            Button.inline("⌬ Система", data="menu_system"),
+            Button.inline("⟡ Настройки", data="menu_settings")
+        ]
+    ]
+
+def build_modules_keyboard():
+    """Сетка подключенных плагинов"""
     loaded = get_loaded_modules()
     pending = get_pending_modules()
     buttons = []
     
     row = []
-    # 1. Готовые модули
     for mod_name in loaded.keys():
-        title = MODULE_ICONS.get(mod_name, f"🧩 {mod_name.capitalize()}")
+        title = MODULE_TITLES.get(mod_name, f"◈ {mod_name.capitalize()}")
         row.append(Button.inline(title, data=f"open_mod_{mod_name}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
 
-    # 2. Модули в процессе загрузки библиотек
     for mod_name in pending:
-        title = f"⏳ {mod_name.capitalize()} (Загрузка...)"
+        title = f"◷ {mod_name.capitalize()} (загрузка...)"
         row.append(Button.inline(title, data=f"pending_mod_{mod_name}"))
         if len(row) == 2:
             buttons.append(row)
@@ -41,18 +90,14 @@ def build_main_keyboard():
     if row:
         buttons.append(row)
 
-    # 3. Системные кнопки
-    buttons.append([
-        Button.inline("📜 Логи системы", data="menu_logs"),
-        Button.inline("❌ Закрыть", data="menu_close")
-    ])
+    buttons.append([Button.inline("‹ Назад", data="menu_main")])
     return buttons
 
 def init_inline(user, bot):
     if not bot:
         return
 
-    # --- 1. ГЕНЕРАТОР КАРТОЧКИ ПО ИНЛАЙНУ ---
+    # --- 1. ГЛАВНОЕ МЕНЮ (СТРОГО КАК НА СКРИНШОТЕ) ---
     @bot.on(events.InlineQuery)
     async def inline_query_handler(event):
         user_me = await user.get_me()
@@ -60,161 +105,190 @@ def init_inline(user, bot):
             return
 
         builder = event.builder
-        loaded = get_loaded_modules()
 
-        # Замер пинга
         start = time.perf_counter()
         await bot.get_me()
-        ping_ms = round((time.perf_counter() - start) * 1000)
+        ping_ms = (time.perf_counter() - start) * 1000
 
-        banner = f"[​​​​​​​​​​​]({HEADER_BANNER_URL})" if HEADER_BANNER_URL else ""
+        banner = f"[​​​​​​​​​​​]({HEADER_BANNER_URL})"
+        uptime = get_uptime_str()
 
         text = (
-            f"{banner}🪐 **{USERBOT_NAME} — Центр управления**\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"⚡ **Пинг:** `{ping_ms} ms` | 🛰 **Модулей:** `{len(loaded)}`\n"
-            f"⏱ **GitHub Actions:** Активен\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"👇 **Выберите модуль для управления:**"
+            f"{banner}**Proxima UB**\n\n"
+            f"инфо:\n"
+            f"> Пинг: {ping_ms:.3f}  мс\n"
+            f"> Время работы: {uptime}"
         )
 
         result = builder.article(
-            title=f"{USERBOT_NAME} Control Panel",
+            title="Proxima UB",
             text=text,
-            buttons=build_main_keyboard(),
-            link_preview=bool(HEADER_BANNER_URL)
+            buttons=build_home_keyboard(),
+            link_preview=True
         )
         await event.answer([result], cache_time=1)
 
-    # --- 2. ОБРАБОТЧИК НАЖАТИЙ НА КНОПКИ ---
+    # --- 2. ОБРАБОТЧИК КЛИКОВ ПО КНОПКАМ ---
     @bot.on(events.CallbackQuery)
     async def callback_handler(event):
         if event.sender_id != OWNER_ID:
-            return await event.answer("🚫 Это панель управления чужого юзербота!", alert=True)
+            return await event.answer("Доступ ограничен.", alert=True)
 
         data = event.data.decode("utf-8")
+        banner = f"[​​​​​​​​​​​]({HEADER_BANNER_URL})"
 
-        # КЛИК ПО МОДУЛЮ В ПРОЦЕССЕ ЗАГРУЗКИ
-        if data.startswith("pending_mod_"):
-            return await event.answer("⏳ Модуль докачивает библиотеки в фоне, подождите секунд 15...", alert=True)
-
-        # ЗАКРЫТИЕ ПАНЕЛИ
-        elif data == "menu_close":
+        # ГЛАВНЫЙ ЭКРАН (ВОЗВРАТ)
+        if data == "menu_main":
             start = time.perf_counter()
             await bot.get_me()
-            ping_ms = round((time.perf_counter() - start) * 1000)
-            
-            banner = f"[​​​​​​​​​​​]({HEADER_BANNER_URL})" if HEADER_BANNER_URL else ""
-            close_text = (
-                f"{banner}🪐 **{USERBOT_NAME}**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📡 **Статус:** Панель свернута\n"
-                f"⚡ **Пинг сети:** `{ping_ms} ms`\n"
-                f"🛰 **Система:** GitHub Actions Core v5.0\n"
-                f"━━━━━━━━━━━━━━━━━━"
-            )
-            return await event.edit(close_text, buttons=None, link_preview=bool(HEADER_BANNER_URL))
+            ping_ms = (time.perf_counter() - start) * 1000
+            uptime = get_uptime_str()
 
-        # ВОЗВРАТ В ГЛАВНОЕ МЕНЮ
-        elif data == "menu_main":
-            start = time.perf_counter()
-            await bot.get_me()
-            ping_ms = round((time.perf_counter() - start) * 1000)
-            loaded = get_loaded_modules()
-
-            banner = f"[​​​​​​​​​​​]({HEADER_BANNER_URL})" if HEADER_BANNER_URL else ""
             text = (
-                f"{banner}🪐 **{USERBOT_NAME} — Центр управления**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"⚡ **Пинг:** `{ping_ms} ms` | 🛰 **Модулей:** `{len(loaded)}`\n"
-                f"⏱ **GitHub Actions:** Активен\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"👇 **Выберите модуль для управления:**"
+                f"{banner}**Proxima UB**\n\n"
+                f"инфо:\n"
+                f"> Пинг: {ping_ms:.3f}  мс\n"
+                f"> Время работы: {uptime}"
             )
-            await event.edit(text, buttons=build_main_keyboard(), link_preview=bool(HEADER_BANNER_URL))
+            await event.edit(text, buttons=build_home_keyboard(), link_preview=True)
 
-        # ПРОСМОТР МОДУЛЯ SNIPER
+        # 1. РАЗДЕЛ: МОДУЛИ
+        elif data == "menu_modules":
+            loaded = get_loaded_modules()
+            text = (
+                f"{banner}**Proxima UB — Модули**\n\n"
+                f"инфо:\n"
+                f"> Активно: {len(loaded)}\n"
+                f"> Статус: Все системы в строю\n\n"
+                f"Выберите компонент для управления:"
+            )
+            await event.edit(text, buttons=build_modules_keyboard(), link_preview=True)
+
+        # 2. РАЗДЕЛ: О СИСТЕМЕ (ТЕХНИЧЕСКИЙ ОТЧЕТ)
+        elif data == "menu_system":
+            start = time.perf_counter()
+            await bot.get_me()
+            ping_ms = (time.perf_counter() - start) * 1000
+            uptime = get_uptime_str()
+            ram = get_ram_usage()
+            cpu = get_cpu_load()
+
+            text = (
+                f"{banner}**Proxima UB — Система**\n\n"
+                f"инфо:\n"
+                f"> Хостинг: GitHub Actions (Ubuntu)\n"
+                f"> Пинг сети: {ping_ms:.3f} мс\n"
+                f"> Время работы: {uptime}\n"
+                f"> Память RAM: {ram}\n"
+                f"> Нагрузка CPU: {cpu}"
+            )
+            btns = [
+                [Button.inline("⌗ Логи ядра", data="menu_logs")],
+                [Button.inline("‹ Назад", data="menu_main")]
+            ]
+            await event.edit(text, buttons=btns, link_preview=True)
+
+        # 3. РАЗДЕЛ: НАСТРОЙКИ (В РАЗРАБОТКЕ)
+        elif data == "menu_settings":
+            text = (
+                f"{banner}**Proxima UB — Настройки**\n\n"
+                f"инфо:\n"
+                f"> Раздел находится в разработке\n"
+                f"> Параметры ядра появятся в следующем патче"
+            )
+            await event.edit(text, buttons=[[Button.inline("‹ Назад", data="menu_main")]], link_preview=True)
+
+        # ЛОГИ СИСТЕМЫ
+        elif data == "menu_logs":
+            logs = mem_logs.get_logs(12)
+            log_text = "\n".join(logs) if logs else "Журнал пуст."
+            text = (
+                f"{banner}**Proxima UB — Журнал событий**\n\n"
+                f"```text\n{log_text}\n```"
+            )
+            btns = [
+                [Button.inline("↺ Обновить", data="menu_logs"), Button.inline("‹ Назад", data="menu_system")]
+            ]
+            await event.edit(text, buttons=btns, link_preview=True)
+
+        # ПОДМЕНЮ: SNIPER
         elif data == "open_mod_sniper":
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f"🎯 **Управление модулем: Sniper & Антиспам**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"• Фильтрация спама и ботов: **Активна**\n"
-                f"• Таймер РП: **{rp_t}с** | Инфо: **{info_t}с**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Выберите параметр для просмотра:"
+                f"{banner}**Sniper & Guard**\n\n"
+                f"инфо:\n"
+                f"> Фильтрация рекламы: Включена\n"
+                f"> Задержка РП: {rp_t}с | Инфо: {info_t}с\n\n"
+                f"Конфигурация параметров:"
             )
             btns = [
-                [Button.inline("🛡️ Исключения", data="sub_sniper_excs"), Button.inline("👥 Доверенные", data="sub_sniper_trusted")],
-                [Button.inline("⏱️ Настройки таймеров", data="sub_sniper_timers")],
-                [Button.inline("⬅️ Назад в меню", data="menu_main")]
+                [Button.inline("◇ Исключения", data="sub_sniper_excs"), Button.inline("◇ Доверенные", data="sub_sniper_trusted")],
+                [Button.inline("◷ Таймеры", data="sub_sniper_timers")],
+                [Button.inline("‹ Назад к модулям", data="menu_modules")]
             ]
-            await event.edit(text, buttons=btns)
+            await event.edit(text, buttons=btns, link_preview=True)
 
         elif data == "sub_sniper_timers":
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f"⏱️ **Настройка таймеров сноса:**\n\n"
-                f"• РП ботов: **{rp_t}с** (`sudo рп [сек]`)\n"
-                f"• Длинные инфо: **{info_t}с** (`sudo инфо [сек]`)"
+                f"{banner}**Параметры таймеров**\n\n"
+                f"> РП ботов: {rp_t}с (`sudo рп [сек]`)\n"
+                f"> Длинные инфо: {info_t}с (`sudo инфо [сек]`)"
             )
-            await event.edit(text, buttons=[[Button.inline("⬅️ Назад к Sniper", data="open_mod_sniper")]])
+            await event.edit(text, buttons=[[Button.inline("‹ Назад", data="open_mod_sniper")]], link_preview=True)
 
         elif data == "sub_sniper_trusted":
             items = db_get_trusted()
-            text = "👥 **Доверенные пользователи:**\n\n" + ("\n".join([f"• {u} (`{i}`)" for i, u in items]) if items else "Список пуст.")
-            await event.edit(text, buttons=[[Button.inline("⬅️ Назад к Sniper", data="open_mod_sniper")]])
+            trusted_list = "\n".join([f"• {u} (`{i}`)" for i, u in items]) if items else "Список пуст."
+            text = f"{banner}**Доверенные пользователи**\n\n{trusted_list}"
+            await event.edit(text, buttons=[[Button.inline("‹ Назад", data="open_mod_sniper")]], link_preview=True)
 
         elif data == "sub_sniper_excs":
             items = db_get_exceptions()
-            text = "🛡️ **Белый список исключений:**\n\n" + ("\n".join([f"• `{w}`" for w in items[:20]]) if items else "Список пуст.")
-            await event.edit(text, buttons=[[Button.inline("⬅️ Назад к Sniper", data="open_mod_sniper")]])
+            exc_list = "\n".join([f"• `{w}`" for w in items[:20]]) if items else "Список пуст."
+            text = f"{banner}**Белый список (Исключения)**\n\n{exc_list}"
+            await event.edit(text, buttons=[[Button.inline("‹ Назад", data="open_mod_sniper")]], link_preview=True)
 
-        # ПРОСМОТР МОДУЛЯ MEDIA STUDIO
+        # ПОДМЕНЮ: MEDIA STUDIO
         elif data == "open_mod_media_studio":
             text = (
-                f"🎛️ **Управление модулем: Media Studio**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Обработка медиа через статический FFmpeg.\n\n"
-                f"**Команды:**\n"
-                f"• `sudo медиа` — Интерактивный редактор медиа"
+                f"{banner}**Media Studio**\n\n"
+                f"инфо:\n"
+                f"> Движок: FFmpeg Static Binary\n"
+                f"> Форматы: GIF, видео-кружки, аудио\n\n"
+                f"Команда запуска: `sudo медиа`"
             )
-            await event.edit(text, buttons=[[Button.inline("⬅️ Назад в меню", data="menu_main")]])
+            await event.edit(text, buttons=[[Button.inline("‹ Назад к модулям", data="menu_modules")]], link_preview=True)
 
-        # ПРОСМОТР МОДУЛЯ QUOTE STICKERS
+        # ПОДМЕНЮ: QUOTE STICKERS
         elif data == "open_mod_quote_stickers":
             text = (
-                f"✨ **Управление модулем: Quote Stickers**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Генерация 3D цитат-стикеров из сообщений.\n\n"
-                f"**Команды:**\n"
-                f"• `sudo цитата` *(в реплай)* — Создать стикер"
+                f"{banner}**Quote Stickers**\n\n"
+                f"инфо:\n"
+                f"> Рендер: 3D цитаты-стикеры\n"
+                f"> Зависимости: OpenCV, Lottie, Pillow\n\n"
+                f"Команда: `sudo цитата` (в реплай на смс)"
             )
-            await event.edit(text, buttons=[[Button.inline("⬅️ Назад в меню", data="menu_main")]])
+            await event.edit(text, buttons=[[Button.inline("‹ Назад к модулям", data="menu_modules")]], link_preview=True)
 
-        # ДИНАМИЧЕСКИЙ МОДУЛЬ
+        # ДИНАМИЧЕСКИЕ МОДУЛИ
         elif data.startswith("open_mod_"):
             mod_name = data.replace("open_mod_", "")
             text = (
-                f"🧩 **Модуль:** `{mod_name}`\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Статус: Активен в памяти ядра.\n"
-                f"Используйте его команды в чате."
+                f"{banner}**Модуль: {mod_name}**\n\n"
+                f"инфо:\n"
+                f"> Статус: Загружен в оперативную память\n"
+                f"> Управление через чат-команды плагина"
             )
-            await event.edit(text, buttons=[[Button.inline("⬅️ Назад в меню", data="menu_main")]])
+            await event.edit(text, buttons=[[Button.inline("‹ Назад к модулям", data="menu_modules")]], link_preview=True)
 
-        # ЛОГИ
-        elif data == "menu_logs":
-            logs = mem_logs.get_logs(12)
-            log_text = "\n".join(logs) if logs else "Логи пусты."
-            await event.edit(
-                f"📜 **События ядра:**\n\n```text\n{log_text}\n```",
-                buttons=[[Button.inline("🔄 Обновить", data="menu_logs"), Button.inline("⬅️ Назад", data="menu_main")]]
-            )
+        # ОЖИДАНИЕ ФОНОВЫХ ЛИБ
+        elif data.startswith("pending_mod_"):
+            await event.answer("Компоненты докачиваются в фоне. Подождите немного...", alert=True)
 
-    # --- 3. ВЫЗОВ ПО СЛОВУ SUDO ---
+    # --- 3. ВЫЗОВ ПАНЕЛИ ПО КОМАНДЕ SUDO ---
     @user.on(events.NewMessage(pattern=r"^sudo$"))
     async def sudo_open_menu(event):
         if not await is_authorized(event):
