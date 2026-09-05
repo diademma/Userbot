@@ -117,17 +117,15 @@ def init_inline(user, bot):
         ping_ms = (time.perf_counter() - start) * 1000
         uptime = get_uptime_str()
 
-        # Цитата-пустышка для фото (дает полоску) и текст без пустых строк
-        banner = f'<blockquote><a href="{HEADER_BANNER_URL}">&#8205;</a></blockquote>'
+        # Чистая ссылка без цитаты + ультра-жирный юникод 𝗣𝗿𝗼𝘅𝗶𝗺𝗮 сразу под фото
+        banner = f'<a href="{HEADER_BANNER_URL}">&#8205;</a>'
         text = (
-            f'{banner}'
-            f'<b>Proxima UB</b>\n\n'
-            f'инфо:\n'
-            f'<blockquote>• Пинг: {ping_ms:.3f} мс\n'
+            f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
+            f'<blockquote expandable>• Пинг: {ping_ms:.3f} мс\n'
             f'• Время работы: {uptime}</blockquote>'
         )
 
-        # Жесткая ручная сборка MTProto-ответа в обход багов Telethon
+        # Жесткая ручная сборка MTProto-ответа
         parsed_text, entities = await bot._parse_message_text(text, 'html')
         send_msg = InputBotInlineMessageText(
             message=parsed_text,
@@ -152,7 +150,7 @@ def init_inline(user, bot):
             return await event.answer("Доступ ограничен.", alert=True)
 
         data = event.data.decode("utf-8")
-        banner = f'<blockquote><a href="{HEADER_BANNER_URL}">&#8205;</a></blockquote>'
+        banner = f'<a href="{HEADER_BANNER_URL}">&#8205;</a>'
 
         if data == "menu_main":
             start = time.perf_counter()
@@ -160,10 +158,8 @@ def init_inline(user, bot):
             ping_ms = (time.perf_counter() - start) * 1000
             uptime = get_uptime_str()
             text = (
-                f'{banner}'
-                f'<b>Proxima UB</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Пинг: {ping_ms:.3f} мс\n'
+                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
+                f'<blockquote expandable>• Пинг: {ping_ms:.3f} мс\n'
                 f'• Время работы: {uptime}</blockquote>'
             )
             await safe_edit(event, bot, text, build_home_keyboard())
@@ -171,10 +167,8 @@ def init_inline(user, bot):
         elif data == "menu_modules":
             loaded = get_loaded_modules()
             text = (
-                f'{banner}'
-                f'<b>Proxima UB — Модули</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Активно компонентов: {len(loaded)}\n'
+                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Модули</b>\n\n'
+                f'<blockquote expandable>• Активно компонентов: {len(loaded)}\n'
                 f'• Состояние: все ядра в норме</blockquote>\n\n'
                 f'Выберите компонент для управления:'
             )
@@ -188,24 +182,20 @@ def init_inline(user, bot):
             ram = get_ram_usage()
             cpu = get_cpu_load()
             text = (
-                f'{banner}'
-                f'<b>Proxima UB — Система</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Сервер: GitHub Actions (Ubuntu)\n'
+                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Система</b>\n\n'
+                f'<blockquote expandable>• Сервер: GitHub Actions (Ubuntu)\n'
                 f'• Пинг сети: {ping_ms:.3f} мс\n'
                 f'• Время работы: {uptime}\n'
                 f'• Занято RAM: {ram}\n'
                 f'• Нагрузка CPU: {cpu}</blockquote>'
             )
-            btns = [[Button.inline("📄 Журнал логов", data="menu_logs")], [Button.inline("« Назад", data="menu_main")]]
+            btns = [[Button.inline("≡ Логи ядра", data="menu_logs")], [Button.inline("« Назад", data="menu_main")]]
             await safe_edit(event, bot, text, btns)
 
         elif data == "menu_settings":
             text = (
-                f'{banner}'
-                f'<b>Proxima UB — Настройки</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Раздел в активной разработке\n'
+                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Настройки</b>\n\n'
+                f'<blockquote expandable>• Раздел в активной разработке\n'
                 f'• Параметры ядра появятся позже</blockquote>'
             )
             await safe_edit(event, bot, text, [[Button.inline("« Назад", data="menu_main")]])
@@ -213,7 +203,7 @@ def init_inline(user, bot):
         elif data == "menu_logs":
             logs = mem_logs.get_logs(12)
             log_text = "\n".join(logs) if logs else "Журнал пуст."
-            text = f'{banner}<b>Proxima UB — Логи ядра</b>\n\n<pre>{log_text}</pre>'
+            text = f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Логи ядра</b>\n\n<pre>{log_text}</pre>'
             btns = [[Button.inline("↺ Обновить", data="menu_logs"), Button.inline("« Назад", data="menu_system")]]
             await safe_edit(event, bot, text, btns)
 
@@ -221,10 +211,8 @@ def init_inline(user, bot):
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f'{banner}'
-                f'<b>Sniper & Guard</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Фильтрация рекламы: активна\n'
+                f'{banner}<b>Sniper & Guard</b>\n\n'
+                f'<blockquote expandable>• Фильтрация рекламы: активна\n'
                 f'• Задержка РП: {rp_t} с\n'
                 f'• Задержка инфо: {info_t} с</blockquote>\n\n'
                 f'Параметры модуля:'
@@ -240,9 +228,8 @@ def init_inline(user, bot):
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f'{banner}'
-                f'<b>Параметры таймеров</b>\n\n'
-                f'<blockquote>• РП ботов: {rp_t} с (sudo рп [сек])\n'
+                f'{banner}<b>Параметры таймеров</b>\n\n'
+                f'<blockquote expandable>• РП ботов: {rp_t} с (sudo рп [сек])\n'
                 f'• Длинные инфо: {info_t} с (sudo инфо [сек])</blockquote>'
             )
             await safe_edit(event, bot, text, [[Button.inline("« Назад", data="open_mod_sniper")]])
@@ -261,10 +248,8 @@ def init_inline(user, bot):
 
         elif data == "open_mod_media_studio":
             text = (
-                f'{banner}'
-                f'<b>Media Studio</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Движок: статический FFmpeg\n'
+                f'{banner}<b>Media Studio</b>\n\n'
+                f'<blockquote expandable>• Движок: статический FFmpeg\n'
                 f'• Поддержка: GIF, видео-кружки, аудио</blockquote>\n\n'
                 f'Команда вызова: <code>sudo медиа</code>'
             )
@@ -272,10 +257,8 @@ def init_inline(user, bot):
 
         elif data == "open_mod_quote_stickers":
             text = (
-                f'{banner}'
-                f'<b>Quote Stickers</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Рендер: 3D цитаты-стикеры\n'
+                f'{banner}<b>Quote Stickers</b>\n\n'
+                f'<blockquote expandable>• Рендер: 3D цитаты-стикеры\n'
                 f'• Либы: OpenCV, Lottie, Pillow</blockquote>\n\n'
                 f'Команда: <code>sudo цитата</code> (в реплай)'
             )
@@ -284,10 +267,8 @@ def init_inline(user, bot):
         elif data.startswith("open_mod_"):
             mod_name = data.replace("open_mod_", "")
             text = (
-                f'{banner}'
-                f'<b>Модуль: {mod_name}</b>\n\n'
-                f'инфо:\n'
-                f'<blockquote>• Статус: загружен в оперативную память\n'
+                f'{banner}<b>Модуль: {mod_name}</b>\n\n'
+                f'<blockquote expandable>• Статус: загружен в оперативную память\n'
                 f'• Доступен через команды в чате</blockquote>'
             )
             await safe_edit(event, bot, text, [[Button.inline("« Назад к модулям", data="menu_modules")]])
