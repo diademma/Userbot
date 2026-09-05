@@ -65,8 +65,8 @@ jobs:
               echo "🎬 [ФОН] FFmpeg мгновенно взят из кэша!"
             fi
 
-            echo "📦 [ФОН] Устанавливаю OpenCV, Pillow, Lottie и др..."
-            pip install rlottie-python pillow opencv-python-headless numpy requests pilmoji
+            echo "📦 [ФОН] Устанавливаю OpenCV, Pillow, Lottie, Gradio и др..."
+            pip install rlottie-python pillow opencv-python-headless numpy requests pilmoji gradio_client
             echo "🎉 [ФОН] Все тяжелые библиотеки готовы!"
           ) &
 
