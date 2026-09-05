@@ -48,8 +48,6 @@ jobs:
           SESSION_STRING: ${{ secrets.SESSION_STRING }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: |
           (
             mkdir -p ~/.local/bin
@@ -63,11 +61,11 @@ jobs:
               rm -rf ffmpeg-master-*
               echo "🎬 [ФОН] FFmpeg готов!"
             else
-              echo "🎬 [ФОН] FFmpeg мгновенно взят из кэша!"
+              echo "🎬 [ФОН] FFmpeg взят из кэша!"
             fi
 
-            echo "📦 [ФОН] Устанавливаю необходимые библиотеки..."
-            pip install rlottie-python pillow opencv-python-headless numpy requests pilmoji
+            echo "📦 [ФОН] Устанавливаю библиотеки (включая ONNX Runtime для 4K AI)..."
+            pip install rlottie-python pillow opencv-python-headless numpy requests pilmoji onnxruntime
             echo "🎉 [ФОН] Все библиотеки готовы!"
           ) &
 
