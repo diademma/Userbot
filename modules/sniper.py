@@ -1,4 +1,4 @@
-# modules/sniper.py
+# modules/sniper.py — Антиспам-снайпер и модератор v5.0 (API Compliant)
 import re
 import asyncio
 import logging
@@ -11,6 +11,27 @@ from core.db import (
     db_del_exception, db_get_exceptions, db_add_banword, db_del_banword, 
     db_get_banwords, db_add_human_regex, db_del_human_regex, db_get_human_regex,
     is_authorized, mem_logs
+)
+
+# --- ОБЯЗАТЕЛЬНЫЕ МЕТАДАННЫЕ API ДЛЯ ЯДРА ---
+TITLE = "⌖ Sniper & Guard"
+BANNER = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
+COMMANDS = (
+    "• sudo спам (в реплай) — Снести рекламу и обучить фильтр\n\n"
+    "🛡️ ИСКЛЮЧЕНИЯ (БЕЛЫЙ СПИСОК):\n"
+    "• sudo +искл / -искл [фраза] — Добавить / удалить\n"
+    "• sudo исклы — Просмотр всех исключений\n\n"
+    "🚫 БАНВОРДЫ И РЕГЕКСЫ:\n"
+    "• sudo +бан / -бан [фраза] [сек] — Бан-фразы\n"
+    "• sudo баны — Список всех банвордов\n"
+    "• sudo +рег / -рег [паттерн] [сек] — Регексы людей\n"
+    "• sudo регексы — Список регексов\n\n"
+    "👥 ДОСТУП И ТАЙМЕРЫ:\n"
+    "• sudo +дов / -дов [@user|ID] — Доверенные лица\n"
+    "• sudo доверенные — Список доверенных\n"
+    "• sudo рп [сек] — Таймер сноса РП команд\n"
+    "• sudo инфо [сек] — Таймер длинных меню\n"
+    "• sudo лог — Последние события системы"
 )
 
 KNOWN_BOT_USERNAMES = {
@@ -153,7 +174,8 @@ async def delete_after(event, delay: int, label: str):
     except Exception as e:
         logging.warning(f"Ошибка удаления: {e}")
 
-def register(client):
+# --- ТОЧКА ВХОДА (НОВЫЙ СТАНДАРТ API) ---
+def register(client, bot=None):
     @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
     async def sniper_chat_handler(event):
         msg = event.message
