@@ -16,6 +16,9 @@ MODULES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mod
 LOADED_MODULES = {}
 PENDING_MODULES = []
 WAITING_NOTIFICATIONS = []
+LAST_LOAD_ERRORS = {}
+
+REQUIRED_METADATA = ["TITLE", "BANNER", "COMMANDS"]
 
 def get_loaded_modules():
     return LOADED_MODULES
@@ -23,18 +26,41 @@ def get_loaded_modules():
 def get_pending_modules():
     return [os.path.splitext(os.path.basename(p))[0] for p in PENDING_MODULES]
 
+def validate_module_api(module, module_name: str) -> tuple[bool, str]:
+    """Проверка наличия всех обязательных метаданных и точки входа"""
+    missing = []
+    
+    # 1. Проверяем обязательные строковые поля
+    for field in REQUIRED_METADATA:
+        val = getattr(module, field, None)
+        if not val or not isinstance(val, str) or not val.strip():
+            # Допускаем альтернативное имя DESCRIPTION для поля COMMANDS
+            if field == "COMMANDS" and getattr(module, "DESCRIPTION", None):
+                continue
+            missing.append(field)
+
+    if missing:
+        return False, f"Отсутствуют обязательные метаданные: {', '.join(missing)}"
+
+    # 2. Проверяем наличие вызываемой функции register
+    if not hasattr(module, "register") or not callable(getattr(module, "register")):
+        return False, "Отсутствует обязательная функция `register(user)`"
+
+    return True, ""
+
 def load_single_module(file_path: str, user, bot=None, silent: bool = False) -> bool:
-    """Загрузка модуля с очисткой кэша импортов"""
+    """Загрузка модуля со строгой валидацией API"""
     module_name = os.path.splitext(os.path.basename(file_path))[0]
     if module_name.startswith("_"):
         return False
 
-    # Сбрасываем кэш файловой системы Python, чтобы он увидел новые библиотеки от pip
     importlib.invalidate_caches()
 
-    # Очищаем битый модуль из памяти перед новой попыткой
-    if module_name in sys.modules and not hasattr(sys.modules[module_name], "register") and not hasattr(sys.modules[module_name], "register_quote_stickers"):
-        sys.modules.pop(module_name, None)
+    # Очищаем поврежденный кэш перед импортом
+    if module_name in sys.modules:
+        mod = sys.modules[module_name]
+        if not hasattr(mod, "register") or not hasattr(mod, "TITLE"):
+            sys.modules.pop(module_name, None)
 
     try:
         if module_name in sys.modules:
@@ -45,29 +71,26 @@ def load_single_module(file_path: str, user, bot=None, silent: bool = False) -> 
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
 
-        success = False
-        if hasattr(module, "register"):
-            sig = inspect.signature(module.register)
-            if len(sig.parameters) >= 2 and bot:
-                module.register(user, bot)
-            else:
-                module.register(user)
-            success = True
+        # СТРОГАЯ ВАЛИДАЦИЯ API
+        is_valid, error_reason = validate_module_api(module, module_name)
+        if not is_valid:
+            sys.modules.pop(module_name, None)
+            LAST_LOAD_ERRORS[module_name] = error_reason
+            if not silent:
+                logging.warning(f"⚠️ Модуль [{module_name}] отклонен ядром: {error_reason}")
+            return False
 
-        elif hasattr(module, "register_media_studio"):
-            module.register_media_studio(user, is_authorized_cb=is_authorized)
-            success = True
+        # РЕГИСТРАЦИЯ ХЭНДЛЕРОВ
+        sig = inspect.signature(module.register)
+        if len(sig.parameters) >= 2 and bot:
+            module.register(user, bot)
+        else:
+            module.register(user)
 
-        elif hasattr(module, "register_quote_stickers"):
-            module.register_quote_stickers(user, is_authorized_cb=is_authorized)
-            success = True
-
-        if success:
-            LOADED_MODULES[module_name] = module
-            logging.info(f"🧩 Модуль [{module_name}] успешно подключен.")
-            return True
-
-        return False
+        LOADED_MODULES[module_name] = module
+        LAST_LOAD_ERRORS.pop(module_name, None)
+        logging.info(f"🧩 Модуль [{module_name}] успешно прошел валидацию и подключен.")
+        return True
 
     except ModuleNotFoundError as e:
         sys.modules.pop(module_name, None)
@@ -79,11 +102,12 @@ def load_single_module(file_path: str, user, bot=None, silent: bool = False) -> 
 
     except Exception as e:
         sys.modules.pop(module_name, None)
-        logging.error(f"❌ Ошибка в модуле [{module_name}]: {e}")
+        LAST_LOAD_ERRORS[module_name] = str(e)
+        logging.error(f"❌ Ошибка выполнения кода в [{module_name}]: {e}")
         return False
 
 async def background_modules_watcher(user, bot=None):
-    """Фоновый воркер: периодически проверяет появление фоновых либ"""
+    """Фоновый воркер ожидания библиотек"""
     await asyncio.sleep(4)
     retries = 35
 
@@ -95,7 +119,7 @@ async def background_modules_watcher(user, bot=None):
             if load_single_module(file_path, user, bot, silent=True):
                 PENDING_MODULES.remove(file_path)
                 m_name = os.path.splitext(os.path.basename(file_path))[0]
-                logging.info(f"🎉 Фоновый модуль [{m_name}] успешно подхвачен на лету!")
+                logging.info(f"🎉 Фоновый модуль [{m_name}] успешно подключен!")
 
     if not PENDING_MODULES:
         logging.info("✅ Все фоновые библиотеки и модули успешно загружены!")
@@ -107,7 +131,7 @@ async def background_modules_watcher(user, bot=None):
                 pass
     else:
         failed = [os.path.splitext(os.path.basename(p))[0] for p in PENDING_MODULES]
-        logging.error(f"⚠️ Не удалось дождаться либ для модулей: {failed}")
+        logging.error(f"⚠️ Не удалось запустить модули: {failed}")
         while WAITING_NOTIFICATIONS:
             msg = WAITING_NOTIFICATIONS.pop(0)
             try:
@@ -126,7 +150,7 @@ def load_all_modules(user, bot=None):
         if load_single_module(f, user, bot, silent=False):
             loaded += 1
 
-    logging.info(f"🚀 Сходу запущено модулей: {loaded}")
+    logging.info(f"🚀 Сходу запущено валидных модулей: {loaded}")
 
     if PENDING_MODULES:
         asyncio.create_task(background_modules_watcher(user, bot))
@@ -164,18 +188,19 @@ def init_hot_reload(user, bot=None):
 
         if not target or target in ["all", "все"]:
             load_all_modules(user, bot)
-            return await event.reply("🔄 Все модули из папки `modules/` перезагружены!")
+            return await event.reply("🔄 Все модули склада повторно провалидированы и перезагружены!")
 
         target_name = target.replace(".py", "")
         file_path = os.path.join(MODULES_DIR, f"{target_name}.py")
 
         if not os.path.exists(file_path):
-            return await event.reply(f"❌ Файл `modules/{target_name}.py` не найден.")
+            return await event.reply(f"❌ Файл `modules/{target_name}.py` не найден на складе.")
 
         if load_single_module(file_path, user, bot, silent=False):
-            await event.reply(f"✅ Модуль `{target_name}` успешно перезагружен в памяти!")
+            await event.reply(f"✅ Модуль `{target_name}` успешно прошел проверку API и перезагружен!")
         else:
-            await event.reply(f"⚠️ Ошибка перезагрузки `{target_name}`. Проверь логи: `sudo лог`")
+            err = LAST_LOAD_ERRORS.get(target_name, "Ошибка валидации API")
+            await event.reply(f"⚠️ Ошибка загрузки `{target_name}`:\n`{err}`")
 
     @user.on(events.NewMessage(pattern=r"^sudo\s+(load|загрузить)$"))
     async def load_module_handler(event):
@@ -198,29 +223,36 @@ def init_hot_reload(user, bot=None):
         if not file_name or not file_name.endswith(".py"):
             return await event.reply("❌ Файл должен заканчиваться на `.py`!")
 
-        status = await event.reply(f"⏳ Скачиваю и внедряю `{file_name}` в ядро...")
+        status = await event.reply(f"⏳ Скачиваю и проверяю API модуля `{file_name}`...")
         save_path = os.path.join(MODULES_DIR, file_name)
+        module_name = file_name[:-3]
 
         try:
-            # ТУТ ИСПРАВЛЕНО НА file=save_path (Telethon syntax)
+            # Скачиваем через file= (Telethon)
             await user.download_media(target, file=save_path)
             
+            # Проверяем соответствие API
             success = load_single_module(save_path, user, bot, silent=False)
             if not success:
-                return await status.edit(f"⚠️ Модуль скачан, но не найден метод регистрации.")
+                err = LAST_LOAD_ERRORS.get(module_name, "Неизвестная ошибка проверки API")
+                # Удаляем с диска бракованный файл, чтобы не засорять склад
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                return await status.edit(f"❌ **Модуль отклонен ядром:**\n`{err}`")
 
-            await status.edit(f"✅ Модуль `{file_name[:-3]}` **активен без перезагрузки**!")
+            await status.edit(f"✅ Модуль `{module_name}` соответствует API и **активен в памяти**!")
 
+            # Авто-пуш только валидных файлов
             subprocess.run([
                 "bash", "-c",
                 f'git config user.name "github-actions[bot]" && '
                 f'git config user.email "41898282+github-actions[bot]@users.noreply.github.com" && '
                 f'git add {save_path} && '
-                f'git commit -m "feat: auto-add module {file_name[:-3]} [skip ci]" && '
+                f'git commit -m "feat: add validated module {module_name} [skip ci]" && '
                 f'git push'
             ])
-            logging.info(f"Модуль {file_name} сохранен в Git.")
+            logging.info(f"Валидный модуль {file_name} сохранен в Git.")
 
         except Exception as e:
             logging.error(f"Ошибка Hot-Reload: {e}")
-            await status.edit(f"❌ Ошибка внедрения модуля:\n`{e}`")
+            await status.edit(f"❌ Критическая ошибка:\n`{e}`")
