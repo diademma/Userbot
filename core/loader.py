@@ -70,7 +70,6 @@ def load_single_module(file_path: str, user, bot=None, silent: bool = False) -> 
         return False
 
     except ModuleNotFoundError as e:
-        # Удаляем недогруженный модуль, чтобы он не висел зомби в памяти
         sys.modules.pop(module_name, None)
         if file_path not in PENDING_MODULES:
             PENDING_MODULES.append(file_path)
@@ -86,7 +85,7 @@ def load_single_module(file_path: str, user, bot=None, silent: bool = False) -> 
 async def background_modules_watcher(user, bot=None):
     """Фоновый воркер: периодически проверяет появление фоновых либ"""
     await asyncio.sleep(4)
-    retries = 35  # Ожидаем максимум ~2.5 минуты
+    retries = 35
 
     while PENDING_MODULES and retries > 0:
         await asyncio.sleep(4)
@@ -98,7 +97,6 @@ async def background_modules_watcher(user, bot=None):
                 m_name = os.path.splitext(os.path.basename(file_path))[0]
                 logging.info(f"🎉 Фоновый модуль [{m_name}] успешно подхвачен на лету!")
 
-    # СРАБАТЫВАНИЕ МАРКЕРА
     if not PENDING_MODULES:
         logging.info("✅ Все фоновые библиотеки и модули успешно загружены!")
         while WAITING_NOTIFICATIONS:
@@ -108,7 +106,6 @@ async def background_modules_watcher(user, bot=None):
             except Exception:
                 pass
     else:
-        # Если время вышло, а модуль так и не смог встать
         failed = [os.path.splitext(os.path.basename(p))[0] for p in PENDING_MODULES]
         logging.error(f"⚠️ Не удалось дождаться либ для модулей: {failed}")
         while WAITING_NOTIFICATIONS:
@@ -119,7 +116,6 @@ async def background_modules_watcher(user, bot=None):
                 pass
 
 def load_all_modules(user, bot=None):
-    """Стартовая загрузка при запуске"""
     if not os.path.exists(MODULES_DIR):
         os.makedirs(MODULES_DIR)
         return
@@ -136,8 +132,6 @@ def load_all_modules(user, bot=None):
         asyncio.create_task(background_modules_watcher(user, bot))
 
 def init_hot_reload(user, bot=None):
-    """Команды: reload, load и перехватчик ранних запросов"""
-
     @user.on(events.NewMessage(pattern=r"^sudo\s+(.+)"))
     async def early_command_interceptor(event):
         if not await is_authorized(event):
@@ -150,7 +144,7 @@ def init_hot_reload(user, bot=None):
             "спам", "ad", "реклама", "бан", "+искл", "-искл", "исклы", 
             "+бан", "-бан", "баны", "+рег", "-рег", "регексы", "+дов", 
             "-дов", "доверенные", "рп", "инфо", "лог", "logs", "load", 
-            "reload", "релоад"
+            "reload", "релоад", "spy"
         ]
 
         if cmd in base_cmds:
@@ -208,7 +202,9 @@ def init_hot_reload(user, bot=None):
         save_path = os.path.join(MODULES_DIR, file_name)
 
         try:
-            await user.download_media(target, file_name=save_path)
+            # ТУТ ИСПРАВЛЕНО НА file=save_path (Telethon syntax)
+            await user.download_media(target, file=save_path)
+            
             success = load_single_module(save_path, user, bot, silent=False)
             if not success:
                 return await status.edit(f"⚠️ Модуль скачан, но не найден метод регистрации.")
