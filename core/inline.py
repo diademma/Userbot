@@ -14,24 +14,12 @@ from core.config import USERBOT_NAME, OWNER_ID
 from core.db import is_authorized, mem_logs
 from core.loader import get_loaded_modules, get_pending_modules, load_single_module, MODULES_DIR
 
+# Дефолтный баннер системы
 HEADER_BANNER_URL = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
 START_TIME = time.time()
 
 # Временное хранилище избранных модулей
 FAVORITE_MODULES = set()
-
-MODULE_TITLES = {
-    "sniper": "⌖ Sniper & Guard",
-    "media_studio": "▷ Media Studio",
-    "quote_stickers": "❝ Quote Stickers"
-}
-
-# Тексты команд для модулей
-MODULE_INFO = {
-    "sniper": "• Фильтрация рекламы\n• sudo рп [сек] — Таймер РП\n• sudo инфо [сек] — Таймер инфо\n• sudo +искл / -искл [фраза]\n• sudo +бан / -бан [фраза]",
-    "media_studio": "• sudo медиа — Запуск редактора\n• Поддержка GIF, кружочков, аудио",
-    "quote_stickers": "• sudo цитата — Генерация 3D стикера\n(Использовать в реплай на сообщение)"
-}
 
 def get_uptime_str() -> str:
     """Форматирование аптайма в виде 00 : 06 : 23"""
@@ -42,7 +30,7 @@ def get_uptime_str() -> str:
     return f"{hours:02d} : {minutes:02d} : {seconds:02d}"
 
 def get_ram_usage() -> str:
-    """Расчет оперативной памяти строго в процентах"""
+    """Подсчет памяти в процентах"""
     try:
         import resource
         proc_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -60,7 +48,7 @@ def get_ram_usage() -> str:
         return "4.8% (воркер: 28.5 МБ)"
 
 def get_cpu_load() -> str:
-    """Нагрузка на процессор"""
+    """Нагрузка на процессор в процентах"""
     try:
         load1, _, _ = os.getloadavg()
         cores = os.cpu_count() or 2
@@ -70,7 +58,7 @@ def get_cpu_load() -> str:
         return "1.2%"
 
 def get_all_warehouse_modules():
-    """Получает список всех .py файлов со склада (папка modules)"""
+    """Получает список всех файлов модулей со склада"""
     if not os.path.exists(MODULES_DIR):
         return []
     files = glob.glob(os.path.join(MODULES_DIR, "*.py"))
@@ -83,14 +71,15 @@ def build_home_keyboard():
     ]
 
 def build_modules_keyboard(tab="act", page=0):
-    """Сборка клавиатуры склада с табами и пагинацией"""
-    loaded = list(get_loaded_modules().keys())
+    """Сборка меню модулей: табы (Избранное | Активные | Склад) + пагинация по 5 штук"""
+    loaded = get_loaded_modules()
+    loaded_keys = list(loaded.keys())
     all_mods = get_all_warehouse_modules()
     favs = list(FAVORITE_MODULES)
 
     if tab == "fav": source_list = favs
     elif tab == "wh": source_list = all_mods
-    else: source_list = loaded
+    else: source_list = loaded_keys
 
     per_page = 5
     total_pages = max(1, (len(source_list) + per_page - 1) // per_page)
@@ -99,22 +88,27 @@ def build_modules_keyboard(tab="act", page=0):
 
     buttons = []
     
-    # 1. Ряд табов (✮ Избранное | ⛬ Активные | ᪬ Склад)
+    # 1. Надежные символы табов: ★ (Избранное) | ⊞ (Активные) | ⧉ (Склад)
     buttons.append([
-        Button.inline("✮" if tab=="fav" else "✩", data="mod_tab_fav_0"),
-        Button.inline("⛬" if tab=="act" else "⛶", data="mod_tab_act_0"),
-        Button.inline("᪬" if tab=="wh" else "⬚", data="mod_tab_wh_0")
+        Button.inline("★" if tab=="fav" else "☆", data="mod_tab_fav_0"),
+        Button.inline("⊞" if tab=="act" else "⊟", data="mod_tab_act_0"),
+        Button.inline("⧉" if tab=="wh" else "▫", data="mod_tab_wh_0")
     ])
 
-    # 2. Модули текущей страницы
-    for mod in current_items:
-        title = MODULE_TITLES.get(mod, f"⊞ {mod.capitalize()}")
-        # Индикатор загрузки
-        if mod in get_pending_modules():
-            title = f"◷ {mod} (загрузка)"
-        buttons.append([Button.inline(title, data=f"open_mod_{mod}")])
+    # 2. Кнопки модулей (названия берутся динамически из самого модуля через API)
+    for mod_name in current_items:
+        if mod_name in loaded:
+            mod_obj = loaded[mod_name]
+            title = getattr(mod_obj, "TITLE", f"⊞ {mod_name.capitalize()}")
+        else:
+            title = f"⧉ {mod_name.capitalize()}"
 
-    # 3. Пагинация
+        if mod_name in get_pending_modules():
+            title = f"◷ {mod_name} (загрузка...)"
+            
+        buttons.append([Button.inline(title, data=f"open_mod_{mod_name}")])
+
+    # 3. Стрелочки пагинации
     nav_row = []
     if page > 0:
         nav_row.append(Button.inline("«", data=f"mod_tab_{tab}_{page-1}"))
@@ -130,11 +124,11 @@ def build_modules_keyboard(tab="act", page=0):
     return buttons
 
 async def safe_edit(event, bot, text, buttons):
-    """Жесткое редактирование через API, гарантирующее invert_media=True"""
+    """Жесткое редактирование через Raw API для сохранения фото наверху"""
     parsed_text, entities = await bot._parse_message_text(text, 'html')
     try:
         await bot(EditInlineBotMessageRequest(
-            id=event.query.msg_id,  # ИСПРАВЛЕНО: Правильный ID сообщения для Telethon
+            id=event.query.msg_id,
             message=parsed_text,
             no_webpage=False,
             invert_media=True,
@@ -145,7 +139,6 @@ async def safe_edit(event, bot, text, buttons):
         pass
     except Exception as e:
         logging.error(f"Raw edit error: {e}")
-        # Фолбэк на стандартный метод
         try:
             await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True)
         except MessageNotModifiedError:
@@ -215,72 +208,77 @@ def init_inline(user, bot):
             )
             await safe_edit(event, bot, text, build_home_keyboard())
 
-        # РАЗДЕЛ: СКЛАД МОДУЛЕЙ (С ТАБАМИ)
+        # РАЗДЕЛ: МОДУЛИ (ТОЛЬКО ЧИСЛО И ЦИТАТА, БЕЗ ЛИШНЕГО ТЕКСТА)
         elif data.startswith("mod_tab_"):
             parts = data.split("_")
             tab = parts[2]
             page = int(parts[3]) if len(parts) > 3 else 0
             
-            loaded = list(get_loaded_modules().keys())
+            loaded = get_loaded_modules()
             all_mods = get_all_warehouse_modules()
             favs = list(FAVORITE_MODULES)
 
             if tab == "fav":
                 lst = favs
-                tab_name = "Избранные"
             elif tab == "wh":
                 lst = all_mods
-                tab_name = "Склад"
             else:
-                lst = loaded
-                tab_name = "Активные"
+                lst = list(loaded.keys())
 
             list_str = "\n".join([f"• {m}" for m in lst]) if lst else "• Пусто"
 
             text = (
                 f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
                 f'• Загружено модулей: {len(loaded)}\n'
-                f'<blockquote expandable>Вкладка: {tab_name}\n\n{list_str}</blockquote>'
+                f'<blockquote expandable>{list_str}</blockquote>'
             )
             await safe_edit(event, bot, text, build_modules_keyboard(tab, page))
 
-        # ОТКРЫТИЕ КОНКРЕТНОГО МОДУЛЯ
+        # ОТКРЫТИЕ МОДУЛЯ: ИНФОРМАЦИЯ И ФОТО БЕРУТСЯ ИЗ САМОГО МОДУЛЯ (API)
         elif data.startswith("open_mod_"):
             mod_name = data.replace("open_mod_", "")
-            is_active = mod_name in get_loaded_modules()
+            loaded = get_loaded_modules()
+            is_active = mod_name in loaded
             is_fav = mod_name in FAVORITE_MODULES
 
-            info_text = MODULE_INFO.get(mod_name, "• Команды не задокументированы\n• Модуль функционирует штатно")
-            status = "АКТИВЕН ⛬" if is_active else "ВЫГРУЖЕН ᪬"
+            if is_active:
+                mod_obj = loaded[mod_name]
+                title = getattr(mod_obj, "TITLE", f"⊞ {mod_name.capitalize()}")
+                mod_banner = getattr(mod_obj, "BANNER", HEADER_BANNER_URL)
+                commands = getattr(mod_obj, "COMMANDS", "• Команды не описаны в API модуля")
+                status = "АКТИВЕН ⊞"
+            else:
+                title = f"⧉ {mod_name.capitalize()}"
+                mod_banner = HEADER_BANNER_URL
+                commands = "• Модуль на складе (выгружен из ОЗУ)\n• Нажмите [ Загрузить ] для активации и просмотра команд"
+                status = "ВЫГРУЖЕН ⧉"
 
+            custom_banner = f'<a href="{mod_banner}">&#8205;</a>'
             text = (
-                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
-                f'• Модуль: {mod_name} [{status}]\n'
-                f'<blockquote expandable>{info_text}</blockquote>'
+                f'{custom_banner}<b>{title}</b> [{status}]\n\n'
+                f'<blockquote expandable>{commands}</blockquote>'
             )
 
             btns = [
                 [
                     Button.inline("Выгрузить" if is_active else "Загрузить", data=f"toggle_act_{mod_name}"),
-                    Button.inline("Убрать ✮" if is_fav else "В Избранное ✮", data=f"toggle_fav_{mod_name}")
+                    Button.inline("Убрать ★" if is_fav else "В Избранное ★", data=f"toggle_fav_{mod_name}")
                 ],
                 [Button.inline("« Назад", data="mod_tab_act_0")]
             ]
             await safe_edit(event, bot, text, btns)
 
-        # ЗАГРУЗКА / ВЫГРУЗКА МОДУЛЯ ИЗ ОЗУ
+        # ПЕРЕКЛЮЧЕНИЕ АКТИВНОСТИ МОДУЛЯ
         elif data.startswith("toggle_act_"):
             mod_name = data.replace("toggle_act_", "")
             from core.loader import LOADED_MODULES
             
             if mod_name in LOADED_MODULES:
-                # ВЫГРУЖАЕМ
                 del LOADED_MODULES[mod_name]
                 if mod_name in sys.modules:
                     del sys.modules[mod_name]
                 await event.answer(f"Модуль {mod_name} выгружен из ОЗУ", alert=True)
             else:
-                # ЗАГРУЖАЕМ
                 file_path = os.path.join(MODULES_DIR, f"{mod_name}.py")
                 if os.path.exists(file_path):
                     if load_single_module(file_path, user, bot, silent=True):
@@ -288,72 +286,107 @@ def init_inline(user, bot):
                     else:
                         await event.answer(f"Ошибка загрузки {mod_name}", alert=True)
                 else:
-                    await event.answer(f"Файл {mod_name}.py не найден на складе", alert=True)
+                    await event.answer(f"Файл {mod_name}.py не найден", alert=True)
 
-            # Обновляем карточку
-            is_active = mod_name in get_loaded_modules()
+            # Перерисовываем карточку модуля
+            loaded = get_loaded_modules()
+            is_active = mod_name in loaded
             is_fav = mod_name in FAVORITE_MODULES
-            info_text = MODULE_INFO.get(mod_name, "• Команды не задокументированы")
-            status = "АКТИВЕН ⛬" if is_active else "ВЫГРУЖЕН ᪬"
 
+            if is_active:
+                mod_obj = loaded[mod_name]
+                title = getattr(mod_obj, "TITLE", f"⊞ {mod_name.capitalize()}")
+                mod_banner = getattr(mod_obj, "BANNER", HEADER_BANNER_URL)
+                commands = getattr(mod_obj, "COMMANDS", "• Команды не описаны в API модуля")
+                status = "АКТИВЕН ⊞"
+            else:
+                title = f"⧉ {mod_name.capitalize()}"
+                mod_banner = HEADER_BANNER_URL
+                commands = "• Модуль на складе (выгружен из ОЗУ)\n• Нажмите [ Загрузить ] для активации и просмотра команд"
+                status = "ВЫГРУЖЕН ⧉"
+
+            custom_banner = f'<a href="{mod_banner}">&#8205;</a>'
             text = (
-                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
-                f'• Модуль: {mod_name} [{status}]\n'
-                f'<blockquote expandable>{info_text}</blockquote>'
+                f'{custom_banner}<b>{title}</b> [{status}]\n\n'
+                f'<blockquote expandable>{commands}</blockquote>'
             )
             btns = [
                 [
                     Button.inline("Выгрузить" if is_active else "Загрузить", data=f"toggle_act_{mod_name}"),
-                    Button.inline("Убрать ✮" if is_fav else "В Избранное ✮", data=f"toggle_fav_{mod_name}")
+                    Button.inline("Убрать ★" if is_fav else "В Избранное ★", data=f"toggle_fav_{mod_name}")
                 ],
                 [Button.inline("« Назад", data="mod_tab_act_0")]
             ]
             await safe_edit(event, bot, text, btns)
 
-        # ДОБАВЛЕНИЕ В ИЗБРАННОЕ
+        # ИЗБРАННОЕ
         elif data.startswith("toggle_fav_"):
             mod_name = data.replace("toggle_fav_", "")
             if mod_name in FAVORITE_MODULES:
                 FAVORITE_MODULES.remove(mod_name)
-                await event.answer(f"Удалено из избранного", alert=False)
+                await event.answer("Удалено из избранного", alert=False)
             else:
                 FAVORITE_MODULES.add(mod_name)
-                await event.answer(f"Добавлено в избранное ✮", alert=False)
-            
-            # Обновляем карточку
-            is_active = mod_name in get_loaded_modules()
-            is_fav = mod_name in FAVORITE_MODULES
-            info_text = MODULE_INFO.get(mod_name, "• Команды не задокументированы")
-            status = "АКТИВЕН ⛬" if is_active else "ВЫГРУЖЕН ᪬"
+                await event.answer("Добавлено в избранное ★", alert=False)
 
+            loaded = get_loaded_modules()
+            is_active = mod_name in loaded
+            is_fav = mod_name in FAVORITE_MODULES
+
+            if is_active:
+                mod_obj = loaded[mod_name]
+                title = getattr(mod_obj, "TITLE", f"⊞ {mod_name.capitalize()}")
+                mod_banner = getattr(mod_obj, "BANNER", HEADER_BANNER_URL)
+                commands = getattr(mod_obj, "COMMANDS", "• Команды не описаны в API модуля")
+                status = "АКТИВЕН ⊞"
+            else:
+                title = f"⧉ {mod_name.capitalize()}"
+                mod_banner = HEADER_BANNER_URL
+                commands = "• Модуль на складе (выгружен из ОЗУ)\n• Нажмите [ Загрузить ] для активации и просмотра команд"
+                status = "ВЫГРУЖЕН ⧉"
+
+            custom_banner = f'<a href="{mod_banner}">&#8205;</a>'
             text = (
-                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
-                f'• Модуль: {mod_name} [{status}]\n'
-                f'<blockquote expandable>{info_text}</blockquote>'
+                f'{custom_banner}<b>{title}</b> [{status}]\n\n'
+                f'<blockquote expandable>{commands}</blockquote>'
             )
             btns = [
                 [
                     Button.inline("Выгрузить" if is_active else "Загрузить", data=f"toggle_act_{mod_name}"),
-                    Button.inline("Убрать ✮" if is_fav else "В Избранное ✮", data=f"toggle_fav_{mod_name}")
+                    Button.inline("Убрать ★" if is_fav else "В Избранное ★", data=f"toggle_fav_{mod_name}")
                 ],
                 [Button.inline("« Назад", data="mod_tab_act_0")]
             ]
             await safe_edit(event, bot, text, btns)
 
-        # РАЗДЕЛ: СИСТЕМА
+        # РАЗДЕЛ: СИСТЕМА (С ВОЗВРАЩЕННЫМИ ЛОГАМИ)
         elif data == "menu_system":
             text = (
-                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
+                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Система</b>\n\n'
                 f'<blockquote expandable>• Сервер: GitHub Actions (Ubuntu)\n'
                 f'• Занято RAM: {get_ram_usage()}\n'
                 f'• Нагрузка CPU: {get_cpu_load()}</blockquote>'
             )
-            await safe_edit(event, bot, text, [[Button.inline("« Назад", data="menu_main")]])
+            btns = [
+                [Button.inline("≡ Логи ядра", data="menu_logs")],
+                [Button.inline("« Назад", data="menu_main")]
+            ]
+            await safe_edit(event, bot, text, btns)
+
+        # РАЗДЕЛ: ЛОГИ
+        elif data == "menu_logs":
+            logs = mem_logs.get_logs(12)
+            log_text = "\n".join(logs) if logs else "Журнал пуст."
+            text = f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Логи ядра</b>\n\n<pre>{log_text}</pre>'
+            btns = [
+                [Button.inline("↺ Обновить", data="menu_logs"), Button.inline("« Назад", data="menu_system")]
+            ]
+            await safe_edit(event, bot, text, btns)
 
         # РАЗДЕЛ: НАСТРОЙКИ
         elif data == "menu_settings":
             text = (
-                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB</b>\n\n'
+                f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Настройки</b>\n\n'
                 f'<blockquote expandable>• Раздел в активной разработке\n'
                 f'• Ожидайте новых патчей ядра</blockquote>'
             )
