@@ -13,7 +13,7 @@ HEADER_BANNER_URL = "https://raw.githubusercontent.com/diademma/Userbot/main/ass
 # Фиксация времени старта ядра
 START_TIME = time.time()
 
-# Строгие символы, которые НИКОГДА не превращаются в цветные эмодзи
+# Чистые технические глифы (не имеют эмодзи-версий)
 MODULE_TITLES = {
     "sniper": "⌖ Sniper & Guard",
     "media_studio": "▷ Media Studio",
@@ -65,7 +65,7 @@ def build_home_keyboard():
             Button.inline("⌘ О системе", data="menu_system")
         ],
         [
-            Button.inline("⌥ Настройки", data="menu_settings")
+            Button.inline("≡ Настройки", data="menu_settings")
         ]
     ]
 
@@ -100,14 +100,14 @@ async def safe_edit(event, text, buttons):
     """Редактирование сообщения с размещением фото строго НАД текстом"""
     try:
         await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True, invert_media=True)
-    except TypeError:
+    except Exception:
         await event.edit(text, buttons=buttons, parse_mode="html", link_preview=True)
 
 def init_inline(user, bot):
     if not bot:
         return
 
-    # --- 1. ГЛАВНОЕ МЕНЮ (HTML-РАЗМЕТКА И ФОТО СВЕРХУ) ---
+    # --- 1. ГЛАВНОЕ МЕНЮ (ФОТО СВЕРХУ, БЕЗ КУРСИВА И БЕЗ ПУСТЫХ СТРОК В ЦИТАТЕ) ---
     @bot.on(events.InlineQuery)
     async def inline_query_handler(event):
         user_me = await user.get_me()
@@ -121,17 +121,15 @@ def init_inline(user, bot):
         ping_ms = (time.perf_counter() - start) * 1000
         uptime = get_uptime_str()
 
-        # Невидимая ссылка на баннер
+        # Невидимая ссылка на фото
         banner = f'<a href="{HEADER_BANNER_URL}">&#8205;</a>'
 
-        # Чистый HTML: Жирный курсив + нативная цитата через <blockquote>
+        # Чистый Bold + цитата без начального \n (строка начинается сразу)
         text = (
-            f"{banner}<b><i>Proxima UB</i></b>\n\n"
+            f"{banner}<b>Proxima UB</b>\n\n"
             f"инфо:\n"
-            f"<blockquote expandable>\n"
-            f"• Пинг: {ping_ms:.3f} мс\n"
-            f"• Время работы: {uptime}\n"
-            f"</blockquote>"
+            f"<blockquote expandable>• Пинг: {ping_ms:.3f} мс\n"
+            f"• Время работы: {uptime}</blockquote>"
         )
 
         result = builder.article(
@@ -142,13 +140,15 @@ def init_inline(user, bot):
             link_preview=True
         )
 
-        # ПРИНУДИТЕЛЬНО ПЕРЕНОСИМ ФОТО НА САМЫЙ ВЕРХ
-        if hasattr(result, "send_message") and hasattr(result.send_message, "invert_media"):
+        # Пробиваемся к TL-объекту и включаем перенос фото наверх
+        if hasattr(result, "result") and hasattr(result.result, "send_message"):
+            result.result.send_message.invert_media = True
+        elif hasattr(result, "send_message"):
             result.send_message.invert_media = True
 
         await event.answer([result], cache_time=1)
 
-    # --- 2. ОБРАБОТЧИК НАЖАТИЙ НА КНОПКИ ---
+    # --- 2. ОБРАБОТЧИК КЛИКОВ ПО КНОПКАМ ---
     @bot.on(events.CallbackQuery)
     async def callback_handler(event):
         if event.sender_id != OWNER_ID:
@@ -165,12 +165,10 @@ def init_inline(user, bot):
             uptime = get_uptime_str()
 
             text = (
-                f"{banner}<b><i>Proxima UB</i></b>\n\n"
+                f"{banner}<b>Proxima UB</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Пинг: {ping_ms:.3f} мс\n"
-                f"• Время работы: {uptime}\n"
-                f"</blockquote>"
+                f"<blockquote expandable>• Пинг: {ping_ms:.3f} мс\n"
+                f"• Время работы: {uptime}</blockquote>"
             )
             await safe_edit(event, text, build_home_keyboard())
 
@@ -178,17 +176,15 @@ def init_inline(user, bot):
         elif data == "menu_modules":
             loaded = get_loaded_modules()
             text = (
-                f"{banner}<b><i>Proxima UB — Модули</i></b>\n\n"
+                f"{banner}<b>Proxima UB — Модули</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Активно компонентов: {len(loaded)}\n"
-                f"• Состояние: все ядра в норме\n"
-                f"</blockquote>\n"
+                f"<blockquote expandable>• Активно компонентов: {len(loaded)}\n"
+                f"• Состояние: все ядра в норме</blockquote>\n\n"
                 f"Выберите компонент для управления:"
             )
             await safe_edit(event, text, build_modules_keyboard())
 
-        # 2. РАЗДЕЛ: О СИСТЕМЕ (ЧИСТЫЙ ОТЧЕТ)
+        # 2. РАЗДЕЛ: О СИСТЕМЕ
         elif data == "menu_system":
             start = time.perf_counter()
             await bot.get_me()
@@ -198,15 +194,13 @@ def init_inline(user, bot):
             cpu = get_cpu_load()
 
             text = (
-                f"{banner}<b><i>Proxima UB — Система</i></b>\n\n"
+                f"{banner}<b>Proxima UB — Система</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Сервер: GitHub Actions (Ubuntu)\n"
+                f"<blockquote expandable>• Сервер: GitHub Actions (Ubuntu)\n"
                 f"• Пинг сети: {ping_ms:.3f} мс\n"
                 f"• Время работы: {uptime}\n"
                 f"• Занято RAM: {ram}\n"
-                f"• Нагрузка CPU: {cpu}\n"
-                f"</blockquote>"
+                f"• Нагрузка CPU: {cpu}</blockquote>"
             )
             btns = [
                 [Button.inline("≡ Логи ядра", data="menu_logs")],
@@ -217,12 +211,10 @@ def init_inline(user, bot):
         # 3. РАЗДЕЛ: НАСТРОЙКИ
         elif data == "menu_settings":
             text = (
-                f"{banner}<b><i>Proxima UB — Настройки</i></b>\n\n"
+                f"{banner}<b>Proxima UB — Настройки</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Раздел в активной разработке\n"
-                f"• Параметры ядра появятся позже\n"
-                f"</blockquote>"
+                f"<blockquote expandable>• Раздел в активной разработке\n"
+                f"• Параметры ядра появятся позже</blockquote>"
             )
             await safe_edit(event, text, [[Button.inline("« Назад", data="menu_main")]])
 
@@ -231,7 +223,7 @@ def init_inline(user, bot):
             logs = mem_logs.get_logs(12)
             log_text = "\n".join(logs) if logs else "Журнал пуст."
             text = (
-                f"{banner}<b><i>Proxima UB — Логи ядра</i></b>\n\n"
+                f"{banner}<b>Proxima UB — Логи ядра</b>\n\n"
                 f"<pre>{log_text}</pre>"
             )
             btns = [
@@ -244,13 +236,11 @@ def init_inline(user, bot):
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f"{banner}<b><i>Sniper & Guard</i></b>\n\n"
+                f"{banner}<b>Sniper & Guard</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Фильтрация рекламы: активна\n"
+                f"<blockquote expandable>• Фильтрация рекламы: активна\n"
                 f"• Задержка РП: {rp_t} с\n"
-                f"• Задержка инфо: {info_t} с\n"
-                f"</blockquote>\n"
+                f"• Задержка инфо: {info_t} с</blockquote>\n\n"
                 f"Параметры модуля:"
             )
             btns = [
@@ -264,35 +254,31 @@ def init_inline(user, bot):
             rp_t = db_get_timer('rp_delay', 10)
             info_t = db_get_timer('info_delay', 30)
             text = (
-                f"{banner}<b><i>Параметры таймеров</i></b>\n\n"
-                f"<blockquote expandable>\n"
-                f"• РП ботов: {rp_t} с (sudo рп [сек])\n"
-                f"• Длинные инфо: {info_t} с (sudo инфо [сек])\n"
-                f"</blockquote>"
+                f"{banner}<b>Параметры таймеров</b>\n\n"
+                f"<blockquote expandable>• РП ботов: {rp_t} с (sudo рп [сек])\n"
+                f"• Длинные инфо: {info_t} с (sudo инфо [сек])</blockquote>"
             )
             await safe_edit(event, text, [[Button.inline("« Назад", data="open_mod_sniper")]])
 
         elif data == "sub_sniper_trusted":
             items = db_get_trusted()
             trusted_list = "\n".join([f"• {u} ({i})" for i, u in items]) if items else "Список пуст."
-            text = f"{banner}<b><i>Доверенные пользователи</i></b>\n\n{trusted_list}"
+            text = f"{banner}<b>Доверенные пользователи</b>\n\n{trusted_list}"
             await safe_edit(event, text, [[Button.inline("« Назад", data="open_mod_sniper")]])
 
         elif data == "sub_sniper_excs":
             items = db_get_exceptions()
             exc_list = "\n".join([f"• {w}" for w in items[:20]]) if items else "Список пуст."
-            text = f"{banner}<b><i>Белый список исключений</i></b>\n\n{exc_list}"
+            text = f"{banner}<b>Белый список исключений</b>\n\n{exc_list}"
             await safe_edit(event, text, [[Button.inline("« Назад", data="open_mod_sniper")]])
 
         # ПОДМЕНЮ: MEDIA STUDIO
         elif data == "open_mod_media_studio":
             text = (
-                f"{banner}<b><i>Media Studio</i></b>\n\n"
+                f"{banner}<b>Media Studio</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Движок: статический FFmpeg\n"
-                f"• Поддержка: GIF, видео-кружки, аудио\n"
-                f"</blockquote>\n"
+                f"<blockquote expandable>• Движок: статический FFmpeg\n"
+                f"• Поддержка: GIF, видео-кружки, аудио</blockquote>\n\n"
                 f"Команда вызова: <code>sudo медиа</code>"
             )
             await safe_edit(event, text, [[Button.inline("« Назад к модулям", data="menu_modules")]])
@@ -300,12 +286,10 @@ def init_inline(user, bot):
         # ПОДМЕНЮ: QUOTE STICKERS
         elif data == "open_mod_quote_stickers":
             text = (
-                f"{banner}<b><i>Quote Stickers</i></b>\n\n"
+                f"{banner}<b>Quote Stickers</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Рендер: 3D цитаты-стикеры\n"
-                f"• Либы: OpenCV, Lottie, Pillow\n"
-                f"</blockquote>\n"
+                f"<blockquote expandable>• Рендер: 3D цитаты-стикеры\n"
+                f"• Либы: OpenCV, Lottie, Pillow</blockquote>\n\n"
                 f"Команда: <code>sudo цитата</code> (в реплай)"
             )
             await safe_edit(event, text, [[Button.inline("« Назад к модулям", data="menu_modules")]])
@@ -314,12 +298,10 @@ def init_inline(user, bot):
         elif data.startswith("open_mod_"):
             mod_name = data.replace("open_mod_", "")
             text = (
-                f"{banner}<b><i>Модуль: {mod_name}</i></b>\n\n"
+                f"{banner}<b>Модуль: {mod_name}</b>\n\n"
                 f"инфо:\n"
-                f"<blockquote expandable>\n"
-                f"• Статус: загружен в оперативную память\n"
-                f"• Доступен через команды в чате\n"
-                f"</blockquote>"
+                f"<blockquote expandable>• Статус: загружен в оперативную память\n"
+                f"• Доступен через команды в чате</blockquote>"
             )
             await safe_edit(event, text, [[Button.inline("« Назад к модулям", data="menu_modules")]])
 
