@@ -1,4 +1,4 @@
-# modules/sniper.py — Антиспам-снайпер и модератор v5.0 (API Compliant)
+# modules/sniper.py — Антиспам-снайпер и модератор v5.1 (Croco Guard)
 import re
 import asyncio
 import logging
@@ -29,6 +29,7 @@ COMMANDS = (
     "👥 ДОСТУП И ТАЙМЕРЫ:\n"
     "• sudo +дов / -дов [@user|ID] — Доверенные лица\n"
     "• sudo доверенные — Список доверенных\n"
+    "• sudo кроко [сек] — Таймер очистки Крокодила (по умолч. 300с)\n"
     "• sudo рп [сек] — Таймер сноса РП команд\n"
     "• sudo инфо [сек] — Таймер длинных меню\n"
     "• sudo лог — Последние события системы"
@@ -39,17 +40,24 @@ KNOWN_BOT_USERNAMES = {
     "vkmusictopbot", "polegamebot", "shmalala_bot", 
     "truemafiabot", "quizbot", "gram_piarbot", 
     "thelacosterobot", "givesharebot", "igravgorodabotbot", 
-    "iris_black_bot", "iris_cm_bot", "iris_dp_bot", "iris_bot"
+    "iris_black_bot", "iris_cm_bot", "iris_dp_bot", "iris_bot",
+    "crocodraw_bot"
 }
 
 KNOWN_BOT_TITLES = [
     "celestiana", "salutespeech", "sber", "vk music", "музыка из вк", 
-    "поле чудес", "iris", "ирис", "мафия", "quiz", "музон", "siren"
+    "поле чудес", "iris", "ирис", "мафия", "quiz", "музон", "siren",
+    "крокодил с рисунками", "крокодил"
 ]
 
 REGEX_FOREIGN_BOT = re.compile(r"@[a-zA-Z0-9_]{4,}bot\b", re.IGNORECASE)
 REGEX_INVITE = re.compile(r"t\.me/(\+|joinchat/|addlist/)", re.IGNORECASE)
 REGEX_GIFT_TRAP = re.compile(r"(подарок|подарка|подарки|приз|призы|бонус|выбери\s+скорее|забирай|забери)", re.IGNORECASE)
+
+REGEX_CROCO_AD_TEXT = re.compile(
+    r"(отвлекли\s+вас|награда\s+в\s+.*кроко|вызывает\s+зависимость|хорошая\s+компания\s+в|вам\s+сообщение|charisma\s+mafia)",
+    re.IGNORECASE
+)
 
 def parse_phrase_and_delay(val: str, default_delay: int = 0) -> tuple[str, int]:
     parts = val.strip().split()
@@ -77,6 +85,46 @@ def identify_tracked_bot(sender) -> tuple[bool, str]:
             if b in full_title:
                 return True, username or full_title
     return False, ""
+
+def classify_croco_message(msg, text: str) -> int:
+    """Точный классификатор для @CrocoDraw_Bot"""
+    croco_timer = db_get_timer('croco_delay', 300)
+
+    # 1. Текстовые маркеры рекламы
+    if REGEX_CROCO_AD_TEXT.search(text):
+        return 0
+
+    # 2. Инвайт-ссылки в тексте
+    if REGEX_INVITE.search(text):
+        return 0
+
+    # 3. Анализ кнопок
+    if msg.buttons:
+        for row in msg.buttons:
+            for btn in row:
+                b_text = (btn.text or "").lower()
+                if "перейти в чат" in b_text or ("перейти" in b_text and "↗" in b_text):
+                    return 0
+
+                if btn.url:
+                    u = btn.url.lower()
+                    if "t.me/+" in u or "joinchat" in u or "addlist" in u:
+                        return 0
+                    if "t.me/" in u and "crocodraw_bot" not in u and "telegra.ph" not in u:
+                        return 0
+
+    # 4. Скрытые ссылки (TextUrl)
+    if msg.entities:
+        for ent in msg.entities:
+            if isinstance(ent, MessageEntityTextUrl) and ent.url:
+                u = ent.url.lower()
+                if "t.me/+" in u or "joinchat" in u or "addlist" in u:
+                    return 0
+                if "t.me/" in u and "crocodraw_bot" not in u and "telegra.ph" not in u:
+                    return 0
+
+    # Если рекламы нет — это игровой процесс (таймер 300 сек)
+    return croco_timer
 
 def is_ad(msg, author_tag: str, is_reply: bool) -> bool:
     text = (msg.raw_text or "") + " " + (msg.message or "")
@@ -117,6 +165,10 @@ def classify_bot_message(event, author_tag: str) -> int | None:
 
     for exc in db_get_exceptions():
         if " ".join(exc.lower().split()) in norm_text: return None
+
+    # Защита Крокодила
+    if "crocodraw" in tag_lower or "крокодил" in tag_lower:
+        return classify_croco_message(msg, text)
 
     if "iris" in tag_lower or "ирис" in tag_lower:
         lines_count = len(text.split('\n'))
@@ -174,7 +226,7 @@ async def delete_after(event, delay: int, label: str):
     except Exception as e:
         logging.warning(f"Ошибка удаления: {e}")
 
-# --- ТОЧКА ВХОДА (НОВЫЙ СТАНДАРТ API) ---
+# --- ТОЧКА ВХОДА API ---
 def register(client, bot=None):
     @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
     async def sniper_chat_handler(event):
@@ -206,21 +258,23 @@ def register(client, bot=None):
         is_tracked, bot_tag = identify_tracked_bot(sender)
         if not is_tracked: return
 
-        logging.info(f"🤖 Сообщение от бота [{bot_tag}]: '{text[:35].replace(chr(10), ' ')}...'")
         delay = classify_bot_message(event, bot_tag)
 
         if delay is None:
-            logging.info(f"🛡️ [{bot_tag}] Сообщение с вечным иммунитетом.")
+            logging.info(f"🛡️ [{bot_tag}] Сообщение с иммунитетом.")
             return
 
         if delay == 0:
-            logging.info(f"💥 [{bot_tag}] РЕКЛАМА/ЛОВУШКА -> Мгновенный снос (0с)")
+            logging.info(f"💥 [{bot_tag}] РЕКЛАМА -> Мгновенный снос (0с)")
             asyncio.create_task(delete_after(event, 0, f"Реклама [{bot_tag}]"))
+        elif delay >= 180:
+            logging.info(f"🎨 [{bot_tag}] Игровое сообщение -> Очистка через {delay}с")
+            asyncio.create_task(delete_after(event, delay, f"Игра [{bot_tag}]"))
         elif delay <= 15:
             logging.info(f"🎭 [{bot_tag}] РП / действие -> Удаление через {delay}с")
             asyncio.create_task(delete_after(event, delay, f"РП [{bot_tag}]"))
         else:
-            logging.info(f"📋 [{bot_tag}] Инфо / меню / топ -> Удаление через {delay}с")
+            logging.info(f"📋 [{bot_tag}] Инфо / меню -> Удаление через {delay}с")
             asyncio.create_task(delete_after(event, delay, f"Инфо [{bot_tag}]"))
 
     @client.on(events.NewMessage(pattern=r"^sudo\s+(.+)"))
@@ -245,6 +299,10 @@ def register(client, bot=None):
                 c = await event.respond(f"🎯 **Реклама уничтожена!** Паттерн:\n`{pat}`")
                 await asyncio.sleep(4)
                 await c.delete()
+
+            elif cmd in ["кроко", "croco"] and val.isdigit():
+                db_set_timer('croco_delay', int(val))
+                await event.reply(f"⏱️ Таймер Крокодила: **{val}**с.")
 
             elif cmd in ["+искл", "+exc"]:
                 phrase = val.strip() or ((await event.get_reply_message()).raw_text if event.is_reply else "")
