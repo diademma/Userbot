@@ -1,4 +1,4 @@
-# modules/sniper.py — Антиспам-снайпер и модератор v5.1 (Croco Guard)
+# modules/sniper.py — Антиспам-снайпер и модератор v5.2 (Croco Guard + Iris Black 1h Lock)
 import re
 import asyncio
 import logging
@@ -32,7 +32,9 @@ COMMANDS = (
     "• sudo кроко [сек] — Таймер очистки Крокодила (по умолч. 300с)\n"
     "• sudo рп [сек] — Таймер сноса РП команд\n"
     "• sudo инфо [сек] — Таймер длинных меню\n"
-    "• sudo лог — Последние события системы"
+    "• sudo лог — Последние события системы\n\n"
+    "⚙️ НАМЕРТВО ВШИТО:\n"
+    "• @iris_black_bot — снос любых смс ровно через 1 час"
 )
 
 KNOWN_BOT_USERNAMES = {
@@ -163,13 +165,21 @@ def classify_bot_message(event, author_tag: str) -> int | None:
     tag_lower = author_tag.lower()
     is_reply = bool(event.is_reply or getattr(msg, 'reply_to_msg_id', None))
 
+    # =========================================================================
+    # 0. ПРИОРИТЕТНОЕ ПРАВИЛО: @iris_black_bot (Удаление ровно через 1 час = 3600с)
+    # =========================================================================
+    if "iris_black_bot" in tag_lower:
+        return 3600
+
+    # 1. Белый список исключений
     for exc in db_get_exceptions():
         if " ".join(exc.lower().split()) in norm_text: return None
 
-    # Защита Крокодила
+    # 2. КРОКОДИЛ (Специализированная логика)
     if "crocodraw" in tag_lower or "крокодил" in tag_lower:
         return classify_croco_message(msg, text)
 
+    # 3. Остальные Ирисы (iris_cm_bot, iris_bot и т.д.)
     if "iris" in tag_lower or "ирис" in tag_lower:
         lines_count = len(text.split('\n'))
         has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
@@ -177,16 +187,20 @@ def classify_bot_message(event, author_tag: str) -> int | None:
             return db_get_timer('info_delay', 30)
         return db_get_timer('rp_delay', 10)
 
+    # 4. Музыкальные и голосовые боты
     if ("vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower) and (msg.audio or is_reply or getattr(msg, 'via_bot_id', None) or "via @" in text.lower()):
         return None
     if msg.audio or "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
         return None
 
+    # 5. Общий детектор рекламы
     if is_ad(msg, author_tag, is_reply): return 0
 
+    # 6. Банворды из базы
     for b_phrase, b_delay in db_get_banwords():
         if " ".join(b_phrase.lower().split()) in norm_text: return b_delay
 
+    # 7. Базовые таймеры для прочих ботов
     lines_count = len(text.split('\n'))
     has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
     if len(text) > 250 or lines_count >= 5 or "teletype.in" in text.lower() or has_large_buttons:
@@ -267,6 +281,9 @@ def register(client, bot=None):
         if delay == 0:
             logging.info(f"💥 [{bot_tag}] РЕКЛАМА -> Мгновенный снос (0с)")
             asyncio.create_task(delete_after(event, 0, f"Реклама [{bot_tag}]"))
+        elif delay == 3600:
+            logging.info(f"⏳ [Iris Black] Сообщение -> Удаление ровно через 1 час (3600с)")
+            asyncio.create_task(delete_after(event, 3600, "Iris Black (1h)"))
         elif delay >= 180:
             logging.info(f"🎨 [{bot_tag}] Игровое сообщение -> Очистка через {delay}с")
             asyncio.create_task(delete_after(event, delay, f"Игра [{bot_tag}]"))
