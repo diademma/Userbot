@@ -1,4 +1,4 @@
-# modules/sniper.py — Антиспам-снайпер и модератор v5.2 (Croco Guard + Iris Black 1h Lock)
+# modules/sniper.py — Антиспам-снайпер и модератор v5.4 (Iris Black Diamond 1h Hardlock)
 import re
 import asyncio
 import logging
@@ -33,16 +33,19 @@ COMMANDS = (
     "• sudo рп [сек] — Таймер сноса РП команд\n"
     "• sudo инфо [сек] — Таймер длинных меню\n"
     "• sudo лог — Последние события системы\n\n"
-    "⚙️ НАМЕРТВО ВШИТО:\n"
-    "• @iris_black_bot — снос любых смс ровно через 1 час"
+    "💎 ЖЕСТКИЙ ПЕРЕХВАТ:\n"
+    "• Iris | Black Diamond (5443619563) — удаление ВСЕХ смс через 1 час"
 )
+
+# Точный Telegram ID бота Iris | Black Diamond (@iris_black_bot)
+IRIS_BLACK_ID = 5443619563
 
 KNOWN_BOT_USERNAMES = {
     "celya", "smartspeech_sber_bot", "vkmusicalrobot", 
     "vkmusictopbot", "polegamebot", "shmalala_bot", 
     "truemafiabot", "quizbot", "gram_piarbot", 
     "thelacosterobot", "givesharebot", "igravgorodabotbot", 
-    "iris_black_bot", "iris_cm_bot", "iris_dp_bot", "iris_bot",
+    "iris_cm_bot", "iris_dp_bot", "iris_bot",
     "crocodraw_bot"
 }
 
@@ -92,22 +95,15 @@ def classify_croco_message(msg, text: str) -> int:
     """Точный классификатор для @CrocoDraw_Bot"""
     croco_timer = db_get_timer('croco_delay', 300)
 
-    # 1. Текстовые маркеры рекламы
-    if REGEX_CROCO_AD_TEXT.search(text):
+    if REGEX_CROCO_AD_TEXT.search(text) or REGEX_INVITE.search(text):
         return 0
 
-    # 2. Инвайт-ссылки в тексте
-    if REGEX_INVITE.search(text):
-        return 0
-
-    # 3. Анализ кнопок
     if msg.buttons:
         for row in msg.buttons:
             for btn in row:
                 b_text = (btn.text or "").lower()
                 if "перейти в чат" in b_text or ("перейти" in b_text and "↗" in b_text):
                     return 0
-
                 if btn.url:
                     u = btn.url.lower()
                     if "t.me/+" in u or "joinchat" in u or "addlist" in u:
@@ -115,7 +111,6 @@ def classify_croco_message(msg, text: str) -> int:
                     if "t.me/" in u and "crocodraw_bot" not in u and "telegra.ph" not in u:
                         return 0
 
-    # 4. Скрытые ссылки (TextUrl)
     if msg.entities:
         for ent in msg.entities:
             if isinstance(ent, MessageEntityTextUrl) and ent.url:
@@ -125,7 +120,6 @@ def classify_croco_message(msg, text: str) -> int:
                 if "t.me/" in u and "crocodraw_bot" not in u and "telegra.ph" not in u:
                     return 0
 
-    # Если рекламы нет — это игровой процесс (таймер 300 сек)
     return croco_timer
 
 def is_ad(msg, author_tag: str, is_reply: bool) -> bool:
@@ -165,21 +159,15 @@ def classify_bot_message(event, author_tag: str) -> int | None:
     tag_lower = author_tag.lower()
     is_reply = bool(event.is_reply or getattr(msg, 'reply_to_msg_id', None))
 
-    # =========================================================================
-    # 0. ПРИОРИТЕТНОЕ ПРАВИЛО: @iris_black_bot (Удаление ровно через 1 час = 3600с)
-    # =========================================================================
-    if "iris_black_bot" in tag_lower:
-        return 3600
-
-    # 1. Белый список исключений
+    # Белый список исключений
     for exc in db_get_exceptions():
         if " ".join(exc.lower().split()) in norm_text: return None
 
-    # 2. КРОКОДИЛ (Специализированная логика)
+    # КРОКОДИЛ
     if "crocodraw" in tag_lower or "крокодил" in tag_lower:
         return classify_croco_message(msg, text)
 
-    # 3. Остальные Ирисы (iris_cm_bot, iris_bot и т.д.)
+    # Обычные Ирисы (iris_cm_bot, дежурные и т.д.)
     if "iris" in tag_lower or "ирис" in tag_lower:
         lines_count = len(text.split('\n'))
         has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
@@ -187,20 +175,20 @@ def classify_bot_message(event, author_tag: str) -> int | None:
             return db_get_timer('info_delay', 30)
         return db_get_timer('rp_delay', 10)
 
-    # 4. Музыкальные и голосовые боты
+    # Музыка и аудио
     if ("vkmusic" in tag_lower or "музык" in tag_lower or "музон" in tag_lower) and (msg.audio or is_reply or getattr(msg, 'via_bot_id', None) or "via @" in text.lower()):
         return None
     if msg.audio or "smartspeech" in tag_lower or "sber" in tag_lower or "salute" in tag_lower:
         return None
 
-    # 5. Общий детектор рекламы
+    # Детектор рекламы
     if is_ad(msg, author_tag, is_reply): return 0
 
-    # 6. Банворды из базы
+    # Банворды
     for b_phrase, b_delay in db_get_banwords():
         if " ".join(b_phrase.lower().split()) in norm_text: return b_delay
 
-    # 7. Базовые таймеры для прочих ботов
+    # Дефолтные меню и команды
     lines_count = len(text.split('\n'))
     has_large_buttons = bool(msg.buttons and len(msg.buttons) >= 2)
     if len(text) > 250 or lines_count >= 5 or "teletype.in" in text.lower() or has_large_buttons:
@@ -250,12 +238,28 @@ def register(client, bot=None):
         if text.lower().startswith("sudo") or text.startswith("."):
             return
 
+        # =========================================================================
+        # 💎 ПРЯМОЙ ПЕРЕХВАТ: IRIS | BLACK DIAMOND (ID: 5443619563)
+        # =========================================================================
+        if event.sender_id == IRIS_BLACK_ID:
+            logging.info("⏳ [Iris | Black Diamond] Поймано сообщение -> Удаление ровно через 1 час (3600с)")
+            asyncio.create_task(delete_after(event, 3600, "Iris Black Diamond (1 час)"))
+            return
+
         sender = None
         try: sender = await event.get_sender()
         except Exception: pass
         if not sender and event.sender_id:
             try: sender = await client.get_entity(event.sender_id)
             except Exception: pass
+
+        # Страховочная проверка по ID объекта и юзернейму
+        s_id = getattr(sender, 'id', None)
+        s_user = (getattr(sender, 'username', '') or '').lower()
+        if s_id == IRIS_BLACK_ID or s_user == "iris_black_bot":
+            logging.info("⏳ [Iris | Black Diamond] Поймано сообщение (по sender) -> Удаление через 1 час (3600с)")
+            asyncio.create_task(delete_after(event, 3600, "Iris Black Diamond (1 час)"))
+            return
 
         is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
 
@@ -281,9 +285,6 @@ def register(client, bot=None):
         if delay == 0:
             logging.info(f"💥 [{bot_tag}] РЕКЛАМА -> Мгновенный снос (0с)")
             asyncio.create_task(delete_after(event, 0, f"Реклама [{bot_tag}]"))
-        elif delay == 3600:
-            logging.info(f"⏳ [Iris Black] Сообщение -> Удаление ровно через 1 час (3600с)")
-            asyncio.create_task(delete_after(event, 3600, "Iris Black (1h)"))
         elif delay >= 180:
             logging.info(f"🎨 [{bot_tag}] Игровое сообщение -> Очистка через {delay}с")
             asyncio.create_task(delete_after(event, delay, f"Игра [{bot_tag}]"))
