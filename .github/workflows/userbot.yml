@@ -27,11 +27,15 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Configure System PATH
+      # Установка Deno (JS-рантайм для решения n-challenge YouTube)
+      - name: Install Deno JS Runtime
         run: |
           mkdir -p ~/.local/bin
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      # КЭШ FFMPEG
       - name: Cache FFmpeg Binary
         id: cache-ffmpeg
         uses: actions/cache@v4
@@ -39,10 +43,12 @@ jobs:
           path: ~/.local/bin/ffmpeg
           key: ${{ runner.os }}-ffmpeg-home-v1
 
+      # Быстрый старт ядра + полный пакет yt-dlp с EJS-компонентами
       - name: Fast Install Core
         run: |
           python -m pip install --upgrade pip
           pip install telethon
+          pip install -U "yt-dlp[default]"
 
       - name: Run 🪐 𝗣𝗿𝗼𝘅𝗶𝗺𝗮 LLEHTABPA with Background Heavy Install
         env:
@@ -51,7 +57,7 @@ jobs:
           SESSION_STRING: ${{ secrets.SESSION_STRING }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          YT_COOKIES: ${{ secrets.YT_COOKIES }} # <--- ПЕРЕДАЕМ КУКИ В PYTHON!
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
           (
             mkdir -p ~/.local/bin
@@ -69,14 +75,14 @@ jobs:
             fi
 
             echo "📦 [ФОН] Устанавливаю библиотеки..."
-            pip install opencv-python-headless numpy pillow pilmoji yt-dlp aiohttp mutagen onnxruntime requests
+            pip install opencv-python-headless numpy pillow pilmoji aiohttp mutagen onnxruntime requests
             echo "🎉 [ФОН] Все библиотеки готовы!"
           ) &
 
           if [ -n "$YT_COOKIES" ]; then
             echo "🍪 [AUTH] Секрет YT_COOKIES успешно передан в систему!"
           else
-            echo "⚠️ [AUTH] ВНИМАНИЕ: Секрет YT_COOKIES не найден в репозитории!"
+            echo "⚠️ [AUTH] ВНИМАНИЕ: Секрет YT_COOKIES не найден!"
           fi
 
           timeout 20400s python app.py || true
