@@ -1,8 +1,9 @@
-# modules/downloader.py — Минималистичный Media Grabber v3.0 (Preview Card + Fix)
+# modules/downloader.py — Мультимедиа комбайн v3.5 (Spotify Multi-Search & Tag Sanitizer)
 import os
 import re
 import sys
 import uuid
+import urllib.parse
 import binascii
 import shutil
 import asyncio
@@ -26,7 +27,13 @@ BANNER = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTAB
 COMMANDS = (
     "• sudo {ссылка} — Интерактивная карточка с превью и кнопками\n"
     "• .dl {ссылка} — Быстрый вызов карточки\n"
-    "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой"
+    "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
+    "Музыкальный движок:\n"
+    "├ 🎵 Spotify (Парсинг + скачивание с Hitmo/Sefon/SoundCloud + вшивка HD обложки)\n"
+    "├ ☁️ SoundCloud (Оригинал 320 kbps)\n"
+    "├ 📌 Pinterest (Видео и Фото без сжатия)\n"
+    "├ 🔴 YouTube (144p-1080p, MP3, Нарезка)\n"
+    "└ ⬛ TikTok / Instagram (Оригиналы без водяных знаков)"
 )
 
 LOGGER = logging.getLogger("MediaGrabber")
@@ -61,31 +68,151 @@ async def ensure_latest_ytdlp():
             stderr=asyncio.subprocess.DEVNULL
         )
         await proc.wait()
-        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до последней версии.")
+        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до актуальной версии.")
     except Exception as e:
         LOGGER.warning(f"Ошибка обновления yt-dlp: {e}")
 
+# --- SPOTIFY ПАРСИНГ ---
 async def get_spotify_meta(url: str) -> dict | None:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://open.spotify.com/oembed?url={url}", timeout=8) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    raw_title = data.get("title", "Track")
+                    author = data.get("author_name", "Artist")
+                    thumb = data.get("thumbnail_url", "")
                     return {
-                        "title": data.get("title", "Track"),
-                        "author": data.get("author_name", "Artist"),
-                        "thumb": data.get("thumbnail_url", "")
+                        "title": raw_title,
+                        "author": author,
+                        "thumb": thumb
                     }
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.warning(f"Spotify oEmbed error: {e}")
     return None
+
+# --- МУЛЬТИ-ПОИСКОВИК МУЗЫКИ (HITMO, SEFON, SOUNDCLOUD) ---
+async def search_and_download_audio(query: str, target_file: Path) -> bool:
+    """Ищет трек на открытых музыкальных ресурсах в обход YouTube блоков"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    encoded_query = urllib.parse.quote(query)
+
+    # 1. Источник: Hitmo (rus.hitmotop.com)
+    try:
+        hitmo_url = f"https://rus.hitmotop.com/search?q={encoded_query}"
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(hitmo_url, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    matches = re.findall(r'href=["\'](https?://[^"\']+/get/music/[^"\']+\.mp3)["\']', html)
+                    if not matches:
+                        matches = re.findall(r'href=["\'](/get/music/[^"\']+\.mp3)["\']', html)
+                        matches = [f"https://rus.hitmotop.com{m}" for m in matches]
+
+                    if matches:
+                        download_url = matches[0]
+                        async with session.get(download_url, timeout=25) as dl_resp:
+                            if dl_resp.status == 200:
+                                with open(target_file, "wb") as f:
+                                    f.write(await dl_resp.read())
+                                if target_file.stat().st_size > 500_000:
+                                    LOGGER.info(f"✅ Трек успешно скачан с Hitmo: {query}")
+                                    return True
+    except Exception as e:
+        LOGGER.warning(f"Hitmo search failed: {e}")
+
+    # 2. Источник: Sefon (sefon.pro)
+    try:
+        sefon_url = f"https://sefon.pro/search/?q={encoded_query}"
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(sefon_url, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    mp3_links = re.findall(r'href=["\'](https?://[^"\']+\.mp3)["\']', html)
+                    if mp3_links:
+                        async with session.get(mp3_links[0], timeout=25) as dl_resp:
+                            if dl_resp.status == 200:
+                                with open(target_file, "wb") as f:
+                                    f.write(await dl_resp.read())
+                                if target_file.stat().st_size > 500_000:
+                                    LOGGER.info(f"✅ Трек успешно скачан с Sefon: {query}")
+                                    return True
+    except Exception as e:
+        LOGGER.warning(f"Sefon search failed: {e}")
+
+    # 3. Источник: SoundCloud через yt-dlp (SoundCloud не блокирует дата-центры)
+    try:
+        import yt_dlp
+        sc_opts = {
+            'ffmpeg_location': get_ffmpeg_path(),
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'bestaudio/best',
+            'outtmpl': str(target_file.with_suffix('')),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '320',
+            }]
+        }
+        loop = asyncio.get_event_loop()
+        def run_sc():
+            with yt_dlp.YoutubeDL(sc_opts) as ydl:
+                return ydl.extract_info(f"scsearch1:{query}", download=True)
+
+        await loop.run_in_executor(None, run_sc)
+        if target_file.exists() and target_file.stat().st_size > 500_000:
+            LOGGER.info(f"✅ Трек скачан с SoundCloud: {query}")
+            return True
+    except Exception as e:
+        LOGGER.warning(f"SoundCloud fallback search failed: {e}")
+
+    return False
+
+# --- ВШИВКА ТЕГОВ И ОБЛОЖКИ SPOTIFY ---
+async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_url: str = None):
+    """Стирает мусорные теги сайтов и вшивает официальный паспорт Spotify"""
+    cover_data = None
+    if cover_url:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(cover_url, timeout=10) as r:
+                    if r.status == 200:
+                        cover_data = await r.read()
+        except Exception:
+            pass
+
+    try:
+        from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, ID3NoHeaderError
+        try:
+            audio = ID3(str(mp3_path))
+            audio.delete() # Полная зачистка мусора сайтов
+        except ID3NoHeaderError:
+            pass
+
+        audio = ID3()
+        audio.add(TIT2(encoding=3, text=title))
+        audio.add(TPE1(encoding=3, text=artist))
+        audio.add(TALB(encoding=3, text=title))
+        if cover_data:
+            audio.add(APIC(
+                encoding=3,
+                mime='image/jpeg',
+                type=3, # Обложка трека
+                desc='Cover',
+                data=cover_data
+            ))
+        audio.save(str(mp3_path), v2_version=3)
+    except Exception as e:
+        LOGGER.warning(f"Mutagen tag write error: {e}")
 
 async def resolve_pinterest_pin(raw_url: str) -> dict:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
     }
-
     try:
         info = await extract_info(raw_url)
         if info:
@@ -106,19 +233,10 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
             async with session.get(raw_url, allow_redirects=True, timeout=10) as resp:
                 if resp.status == 200:
                     html = await resp.text()
-
                     m_vpin = re.search(r'https://v\.pinimg\.com/videos/[^\s"\'<>]+\.mp4', html)
-                    if m_vpin:
-                        return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vpin.group(0), "thumb": None}
-
-                    m_m3u8 = re.search(r'https://v\.pinimg\.com/videos/[^\s"\'<>]+\.m3u8', html)
-                    if m_m3u8:
-                        return {"is_video": True, "title": "Pinterest Video", "direct_url": m_m3u8.group(0), "thumb": None}
-
+                    if m_vpin: return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vpin.group(0), "thumb": None}
                     m_vid = re.search(r'<meta\s+property=["\']og:video(?::secure_url)?["\']\s+content=["\']([^"\']+)["\']', html)
-                    if m_vid:
-                        return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vid.group(1), "thumb": None}
-
+                    if m_vid: return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vid.group(1), "thumb": None}
                     m_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
                     if m_img:
                         orig_url = re.sub(r'/\d+x/', '/originals/', m_img.group(1))
@@ -148,7 +266,6 @@ def register(client, bot=None):
     asyncio.create_task(ensure_latest_ytdlp())
 
     async def execute_download(target_chat_id, session, action, time_range=None, reply_to_id=None, status_event=None):
-        import yt_dlp
         url = session["direct_url"] or session["url"]
         platform = session["platform"]
         ffmpeg_bin = get_ffmpeg_path()
@@ -158,19 +275,53 @@ def register(client, bot=None):
             except Exception: pass
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            # 1. Скачивание фото Pinterest напрямую
+            tmp_path = Path(tmp_dir)
+
+            # 1. ОБРАБОТКА SPOTIFY (Через умный мульти-поисковик)
+            if platform == "spotify":
+                meta = session.get("spotify_meta") or {}
+                artist = meta.get("author", "").strip()
+                title = meta.get("title", "Track").strip()
+                search_query = f"{artist} - {title}".strip(" -")
+
+                out_mp3 = tmp_path / "track.mp3"
+                ok = await search_and_download_audio(search_query, out_mp3)
+
+                if not ok or not out_mp3.exists():
+                    if status_event:
+                        try: await status_event.edit("❌ <b>Не удалось найти трек в аудиобазах.</b>", parse_mode="html")
+                        except Exception: pass
+                    return
+
+                # Зачищаем левые метаданные и вшиваем оригинальные теги и обложку Spotify
+                await apply_clean_metadata(out_mp3, title, artist, meta.get("thumb"))
+
+                await client.send_file(
+                    target_chat_id,
+                    file=str(out_mp3),
+                    reply_to=reply_to_id,
+                    caption=f"🎵 <b>{artist}</b> — <i>{title}</i>",
+                    parse_mode="html",
+                    attributes=[DocumentAttributeAudio(title=title, performer=artist)]
+                )
+                if status_event:
+                    try: await status_event.edit("✅ <b>Готово!</b>", parse_mode="html")
+                    except Exception: pass
+                return
+
+            # 2. ПРЯМАЯ ЗАГРУЗКА ФОТО PINTEREST
             if platform == "pinterest" and not session.get("is_video"):
                 direct_img = session.get("direct_url") or session.get("thumb")
                 if direct_img:
                     async with aiohttp.ClientSession() as s:
                         async with s.get(direct_img) as r:
                             if r.status == 200:
-                                p_file = os.path.join(tmp_dir, "pinterest.jpg")
+                                p_file = tmp_path / "pinterest.jpg"
                                 with open(p_file, "wb") as f:
                                     f.write(await r.read())
                                 await client.send_file(
                                     target_chat_id,
-                                    file=p_file,
+                                    file=str(p_file),
                                     reply_to=reply_to_id,
                                     caption=f"📌 <b>{session.get('title', 'Pinterest')}</b>",
                                     parse_mode="html"
@@ -180,7 +331,9 @@ def register(client, bot=None):
                                     except Exception: pass
                                 return
 
-            out_template = os.path.join(tmp_dir, "%(title).50s.%(ext)s")
+            # 3. СТАНДАРТНАЯ ЗАГРУЗКА (YOUTUBE, TIKTOK, INSTAGRAM, SOUNDCLOUD)
+            import yt_dlp
+            out_template = str(tmp_path / "%(title).50s.%(ext)s")
             ydl_opts = {
                 'ffmpeg_location': ffmpeg_bin,
                 'quiet': True,
@@ -197,12 +350,8 @@ def register(client, bot=None):
 
             is_audio = False
 
-            if action == "mp3" or platform in ("spotify", "soundcloud"):
+            if action == "mp3" or platform == "soundcloud":
                 is_audio = True
-                if platform == "spotify" and session.get("spotify_meta"):
-                    meta = session["spotify_meta"]
-                    url = f"ytsearch1:{meta['author']} - {meta['title']} audio"
-
                 ydl_opts.update({
                     'format': 'bestaudio/best',
                     'postprocessors': [{
@@ -211,14 +360,12 @@ def register(client, bot=None):
                         'preferredquality': '320',
                     }]
                 })
-
             elif action in ("144", "360", "720", "1080"):
                 res = action
                 ydl_opts.update({
                     'format': f'bv*[height<={res}]+ba/b[height<={res}]/bestvideo[height<={res}]/best',
                     'merge_output_format': 'mp4'
                 })
-
             else:
                 ydl_opts.update({
                     'format': UNIVERSAL_FORMAT,
@@ -230,7 +377,6 @@ def register(client, bot=None):
                 def run_ydl():
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         return ydl.extract_info(url, download=True)
-
                 info = await loop.run_in_executor(None, run_ydl)
             except Exception as e:
                 LOGGER.error(f"Download error: {e}")
@@ -239,24 +385,20 @@ def register(client, bot=None):
                     except Exception: pass
                 return
 
-            downloaded_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if not f.endswith(".part")]
-            if not downloaded_files:
+            downloaded = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if not f.endswith(".part")]
+            if not downloaded:
                 if status_event:
                     try: await status_event.edit("❌ <b>Файл не найден.</b>", parse_mode="html")
                     except Exception: pass
                 return
 
-            main_file = max(downloaded_files, key=os.path.getsize)
-
+            main_file = max(downloaded, key=os.path.getsize)
             title = (info.get("title") if info else None) or session.get("title", "Media")
             uploader = (info.get("uploader") if info else None) or (info.get("artist") if info else "")
             duration = int((info.get("duration") if info else 0) or 0)
 
             attrs = []
             if is_audio:
-                if platform == "spotify" and session.get("spotify_meta"):
-                    title = session["spotify_meta"]["title"]
-                    uploader = session["spotify_meta"]["author"]
                 attrs = [DocumentAttributeAudio(title=title, performer=uploader, duration=duration)]
             elif main_file.endswith(".mp4"):
                 attrs = [DocumentAttributeVideo(duration=duration, w=1280, h=720, supports_streaming=True)]
@@ -265,7 +407,7 @@ def register(client, bot=None):
             if time_range:
                 caption += f"\n✂️ Нарезка: <code>[{time_range[0]} - {time_range[1]}]</code>"
 
-            # ОТПРАВКА НАПРЯМУЮ В ЧАТ СЕССИИ (Никаких PeerIdInvalidError)
+            # Точная отправка в чат сессии юзербота
             await client.send_file(
                 target_chat_id,
                 file=main_file,
@@ -347,7 +489,7 @@ def register(client, bot=None):
         thumb_url = info.get("thumbnail") or (p_info.get("thumb") if p_info else None) or (spotify_meta.get("thumb") if spotify_meta else None)
         title = info.get("title", "Медиафайл")
 
-        # Вшиваем превью в начало карточки (баннер сверху сообщения)
+        # Вшитое фото-превью вверху сообщения
         banner_tag = f'<a href="{thumb_url}">&#8205;</a>' if thumb_url else ''
 
         buttons = []
@@ -383,7 +525,7 @@ def register(client, bot=None):
             caption_title = f"{artist} — {song}" if artist else song
             text = f"{banner_tag}🎵 <b>{caption_title}</b>"
             buttons = [
-                [Button.inline("🎵 Скачать трек (MP3 320k)", data=f"dl_{sess_id}_mp3")]
+                [Button.inline("🎵 Скачать трек", data=f"dl_{sess_id}_mp3")]
             ]
 
         elif platform == "tiktok":
@@ -396,7 +538,7 @@ def register(client, bot=None):
         else: # Instagram и прочие
             text = f"{banner_tag}🎬 <b>{title[:65]}</b>"
             buttons = [
-                [Button.inline("🎬 Скачать видео", data=f"dl_{sess_id}_media")],
+                [Button.inline("🎬 Скачать медиа", data=f"dl_{sess_id}_media")],
                 [Button.inline("🔊 Аудио (MP3)", data=f"dl_{sess_id}_mp3")]
             ]
 
@@ -408,7 +550,7 @@ def register(client, bot=None):
             "spotify_meta": spotify_meta,
             "is_video": p_info.get("is_video", True) if p_info else True,
             "direct_url": p_info.get("direct_url") if p_info else None,
-            "chat_id": event.chat_id,        # Реальный ID чата для загрузки
+            "chat_id": event.chat_id,
             "reply_id": event.id,
             "text": text,
             "buttons": buttons
@@ -448,7 +590,6 @@ def register(client, bot=None):
                 )
 
             await event.answer("⚡ Загрузка...")
-            # ВАЖНО: передаем session["chat_id"], так как в event.chat_id инлайн-кнопок лежит None!
             asyncio.create_task(
                 execute_download(
                     session["chat_id"],
