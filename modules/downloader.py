@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v8.5 (Cookie Client Fix: web_embedded)
+# modules/downloader.py — Мультимедиа комбайн v9.0 (True -tv_downgraded Exclusion Fix)
 import os
 import re
 import sys
@@ -31,12 +31,13 @@ COMMANDS = (
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
     "Мульти-поиск аудио:\n"
-    "├ 🍪 YouTube Authenticated (Через web_embedded без ошибки reload)\n"
+    "├ 🍪 YouTube Authenticated (Без сломанного tv_downgraded)\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
     "└ 🔴 Piped Stream (Резервный аудио-шлюз)"
 )
 
+# Заглушаем системный спам Telethon
 for noisy in ("telethon.client.updates", "telethon.client.uploads", "telethon.network.mtprotosender"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -46,14 +47,6 @@ SESSIONS = {}
 WAITING_TRIM = {}
 
 UNIVERSAL_FORMAT = "bv*+ba/b/bestvideo/bestaudio/best"
-
-# Аргументы yt-dlp, устраняющие ошибку 'The page needs to be reloaded'
-YT_CLIENT_ARGS = {
-    'youtube': {
-        'player_client': ['web_embedded', 'default', 'mweb'],
-        'player_skip': ['tv_downgraded', 'tv']
-    }
-}
 
 PIPED_INSTANCES = [
     "https://api.piped.private.coffee",
@@ -185,6 +178,50 @@ async def get_spotify_meta(url: str) -> dict | None:
 
     return {"title": title or "Track", "author": artist, "thumb": thumb} if title else None
 
+# --- ЗАГРУЗКА YOUTUBE ПО КУКАМ С БЕЗОПАСНЫМИ КЛИЕНТАМИ ---
+async def download_auth_youtube(query_or_url: str, target_file: Path, cookie_path: str) -> bool:
+    import yt_dlp
+    loop = asyncio.get_event_loop()
+    target = query_or_url if query_or_url.startswith("http") else f"ytsearch1:{query_or_url}"
+
+    # Ротация профилей клиентов (строго с отключением -tv_downgraded)
+    client_profiles = [
+        ['default', '-tv_downgraded', '-tv', 'web_embedded'],
+        ['web_embedded', 'mweb', 'android']
+    ]
+
+    for c_profile in client_profiles:
+        try:
+            LOGGER.info(f"  ├ 🍪 Пробую клиенты YouTube: {c_profile}...")
+            yt_opts = {
+                'ffmpeg_location': get_ffmpeg_path(),
+                'cookiefile': cookie_path,
+                'quiet': True,
+                'no_warnings': True,
+                'format': 'ba/b/bestaudio/best',
+                'outtmpl': str(target_file.with_suffix('')),
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': c_profile
+                    }
+                },
+                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
+            }
+
+            def run_dl():
+                with yt_dlp.YoutubeDL(yt_opts) as ydl:
+                    return ydl.extract_info(target, download=True)
+
+            await loop.run_in_executor(None, run_dl)
+            if target_file.exists() and target_file.stat().st_size > 400_000:
+                LOGGER.info(f"  └ 🎉 Успешно скачано по кукам (профиль: {c_profile})!")
+                return True
+        except Exception as e:
+            LOGGER.info(f"  ├ ⚠️ Профиль {c_profile} ошибка: {e}")
+            continue
+
+    return False
+
 # --- МУЛЬТИ-ШЛЮЗ ПОИСКА АУДИО ---
 async def search_and_download_audio(query: str, target_file: Path, throttler: StatusThrottler) -> bool:
     headers = {
@@ -197,33 +234,12 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
 
     LOGGER.info(f"🔎 [Поиск] Старт поиска трека: '{clean_q}'")
 
-    # 1. YouTube по кукам через безопасный клиент web_embedded (БЕЗ ОШИБКИ RELOAD)
+    # 1. YouTube по кукам через чистый web_embedded без tv_downgraded
     if cookie_path:
-        LOGGER.info(f"  ├ 🍪 [1/5] Скачиваю с YouTube по кукам (web_embedded)...")
+        LOGGER.info(f"  ├ 🍪 [1/5] Скачиваю с YouTube по авторизации...")
         await throttler.update(f"⬇️ <b>YouTube:</b> скачиваю по авторизации <code>{clean_q}</code>...", force=True)
-        try:
-            import yt_dlp
-            loop = asyncio.get_event_loop()
-            yt_opts = {
-                'ffmpeg_location': get_ffmpeg_path(),
-                'cookiefile': cookie_path,
-                'quiet': True,
-                'no_warnings': True,
-                'format': 'ba/b/bestaudio/best',
-                'outtmpl': str(target_file.with_suffix('')),
-                'extractor_args': YT_CLIENT_ARGS,
-                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
-            }
-            def run_auth_yt():
-                with yt_dlp.YoutubeDL(yt_opts) as ydl:
-                    return ydl.extract_info(f"ytsearch1:{clean_q}", download=True)
-
-            await loop.run_in_executor(None, run_auth_yt)
-            if target_file.exists() and target_file.stat().st_size > 400_000:
-                LOGGER.info(f"  └ 🎉 Успешно скачано с YouTube по кукам!")
-                return True
-        except Exception as e:
-            LOGGER.info(f"  ├ ⚠️ Ошибка загрузки по кукам: {e}")
+        ok = await download_auth_youtube(clean_q, target_file, cookie_path)
+        if ok: return True
 
     # 2. Hitmo
     LOGGER.info(f"  ├ 🌐 [2/5] Проверяю Hitmo...")
@@ -298,8 +314,8 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
     except Exception as e:
         LOGGER.info(f"  ├ ⚠️ SoundCloud: {e}")
 
-    # 5. Резервный Piped Stream
-    LOGGER.info(f"  ├ 🔴 [5/5] Подключаю резервный Piped Stream...")
+    # 5. Piped поиск + Загрузка по найденному ID
+    LOGGER.info(f"  ├ 🔴 [5/5] Подключаю Piped Stream...")
     for instance in PIPED_INSTANCES:
         try:
             search_api = f"{instance}/search?q={encoded_query}&filter=music_songs"
@@ -308,11 +324,28 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
                     if resp.status != 200 or "json" not in resp.headers.get("Content-Type", "").lower(): continue
                     data = await resp.json(content_type=None)
                     items = data.get("items", [])
+
+                    # Если фильтр музыки пуст — пробуем общий поиск
+                    if not items:
+                        search_api_all = f"{instance}/search?q={encoded_query}"
+                        async with session.get(search_api_all, timeout=7) as r_all:
+                            if r_all.status == 200 and "json" in r_all.headers.get("Content-Type", "").lower():
+                                d_all = await r_all.json(content_type=None)
+                                items = d_all.get("items", [])
+
                     if not items: continue
 
                     found_video_id = items[0].get("url", "").replace("/watch?v=", "")
                     if not found_video_id: continue
 
+                    LOGGER.info(f"  ├ 🎵 Найдено на Piped: '{items[0].get('title')}' ({found_video_id})")
+
+                    # Если куки есть — сразу качаем этот конкретный найденный ролик через обход
+                    if cookie_path:
+                        ok = await download_auth_youtube(f"https://www.youtube.com/watch?v={found_video_id}", target_file, cookie_path)
+                        if ok: return True
+
+                    # Либо забираем поток через прокси самого Piped
                     stream_api = f"{instance}/streams/{found_video_id}"
                     async with session.get(stream_api, timeout=10) as s_resp:
                         if s_resp.status == 200 and "json" in s_resp.headers.get("Content-Type", "").lower():
@@ -417,7 +450,11 @@ async def extract_info(url: str):
         'no_warnings': True,
         'skip_download': True,
         'format': UNIVERSAL_FORMAT,
-        'extractor_args': YT_CLIENT_ARGS,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['default', '-tv_downgraded', '-tv', 'web_embedded']
+            }
+        }
     }
     if cookie_path:
         opts['cookiefile'] = cookie_path
@@ -492,7 +529,11 @@ def register(client, bot=None):
                 'quiet': True,
                 'no_warnings': True,
                 'outtmpl': out_template,
-                'extractor_args': YT_CLIENT_ARGS,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['default', '-tv_downgraded', '-tv', 'web_embedded']
+                    }
+                }
             }
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file
