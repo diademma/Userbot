@@ -2,7 +2,7 @@ name: "🪐 𝗣𝗿𝗼𝘅𝗶𝗺𝗮 LLEHTABPA"
 
 on:
   schedule:
-    - cron: '0 */4 * * *' # Резервный перезапуск каждые 4 часа
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -39,13 +39,12 @@ jobs:
           path: ~/.local/bin/ffmpeg
           key: ${{ runner.os }}-ffmpeg-home-v1
 
-      # МОМЕНТАЛЬНЫЙ СТАРТ: Только необходимое ядро
+      # Моментальный старт за 3 секунды
       - name: Fast Install Core
         run: |
           python -m pip install --upgrade pip
           pip install telethon
 
-      # Запуск бота + быстрая фоновая доустановка зависимостей
       - name: Run 🪐 𝗣𝗿𝗼𝘅𝗶𝗺𝗮 LLEHTABPA with Background Heavy Install
         env:
           API_ID: ${{ secrets.API_ID }}
@@ -69,8 +68,8 @@ jobs:
               echo "🎬 [ФОН] FFmpeg взят из кэша!"
             fi
 
-            echo "📦 [ФОН] Устанавливаю модульные библиотеки..."
-            pip install yt-dlp aiohttp mutagen pillow numpy requests pilmoji onnxruntime
+            echo "📦 [ФОН] Устанавливаю библиотеки..."
+            pip install opencv-python-headless numpy pillow pilmoji yt-dlp aiohttp mutagen onnxruntime requests
             echo "🎉 [ФОН] Все библиотеки готовы!"
           ) &
 
