@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v4.5 (Verbose Search Radar & Piped Gateway)
+# modules/downloader.py — Мультимедиа комбайн v5.0 (Live Invidious & Verified Piped Gateways)
 import os
 import re
 import sys
@@ -29,13 +29,14 @@ COMMANDS = (
     "• sudo {ссылка} — Интерактивная карточка с превью и кнопками\n"
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
-    "Мульти-поиск аудио:\n"
+    "Живой мульти-поиск аудио:\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
-    "└ 🔴 YouTube Music Gateway (Редкий рок/метал без блокировок)"
+    "├ 🔴 Живой Invidious API (Парсинг с api.invidious.io)\n"
+    "└ 🔴 Проверенные Piped шлюзы (Privacy, Coffee, Owo)"
 )
 
-# Заглушаем спам Telethon
+# Заглушаем спам Telethon в консоли
 for noisy in ("telethon.client.updates", "telethon.client.uploads", "telethon.network.mtprotosender"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -46,12 +47,20 @@ WAITING_TRIM = {}
 
 UNIVERSAL_FORMAT = "bv*+ba/b/bestvideo/bestaudio/best"
 
+# Только проверенные и работающие шлюзы
 PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.leptons.xyz",
-    "https://pipedapi.nosebs.ru",
-    "https://api.piped.yt",
-    "https://pipedapi.adminforge.de"
+    "https://piped-api.privacy.com.de",
+    "https://pipedapi.reallyaweso.me",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.owo.si"
+]
+
+INVIDIOUS_FALLBACKS = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://yewtu.be",
+    "https://inv.thepixora.com",
+    "https://invidious.tiekoetter.com"
 ]
 
 def get_ffmpeg_path():
@@ -79,7 +88,7 @@ async def ensure_latest_ytdlp():
             stderr=asyncio.subprocess.DEVNULL
         )
         await proc.wait()
-        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до последней версии.")
+        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до актуальной версии.")
     except Exception as e:
         LOGGER.warning(f"Ошибка обновления yt-dlp: {e}")
 
@@ -166,7 +175,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
             except Exception: pass
 
     # 1. Hitmo
-    LOGGER.info(f"  ├ 🌐 [1/4] Проверяю Hitmo...")
+    LOGGER.info(f"  ├ 🌐 [1/5] Проверяю Hitmo...")
     await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 <i>Hitmo...</i>")
     try:
         hitmo_url = f"https://rus.hitmotop.com/search?q={encoded_query}"
@@ -193,7 +202,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
     LOGGER.info(f"  ├ ❌ Hitmo: трек не найден")
 
     # 2. Sefon
-    LOGGER.info(f"  ├ 🌐 [2/4] Проверяю Sefon...")
+    LOGGER.info(f"  ├ 🌐 [2/5] Проверяю Sefon...")
     await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 <i>Sefon...</i>")
     try:
         sefon_url = f"https://sefon.pro/search/?q={encoded_query}"
@@ -216,7 +225,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
     LOGGER.info(f"  ├ ❌ Sefon: трек не найден")
 
     # 3. SoundCloud
-    LOGGER.info(f"  ├ ☁️ [3/4] Проверяю SoundCloud...")
+    LOGGER.info(f"  ├ ☁️ [3/5] Проверяю SoundCloud...")
     await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ <i>SoundCloud...</i>")
     try:
         import yt_dlp
@@ -241,13 +250,81 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
         LOGGER.info(f"  ├ ⚠️ SoundCloud ошибка: {e}")
     LOGGER.info(f"  ├ ❌ SoundCloud: трек не найден")
 
-    # 4. YouTube Music Gateway (Piped API — обход дата-центр блоков)
-    LOGGER.info(f"  ├ 🔴 [4/4] Подключаю YouTube Music Gateway (Piped)...")
-    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ SoundCloud: ❌\n└ 🔴 <i>YouTube Music Gateway...</i>")
+    # 4. Живой Invidious API (с автоматическим подбором активных серверов)
+    LOGGER.info(f"  ├ 🔴 [4/5] Подключаю живой Invidious API...")
+    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ SoundCloud: ❌\n└ 🔴 <i>Invidious Gateway...</i>")
+
+    invidious_hosts = list(INVIDIOUS_FALLBACKS)
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.invidious.io/instances.json?sort_by=type,health", timeout=5) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    live = [f"https://{item[0]}" for item in data if item[1].get("type") == "https" and item[1].get("api") and item[1].get("monitor", {}).get("status") == 200]
+                    if live: invidious_hosts = live[:4] + invidious_hosts
+    except Exception: pass
+
+    for inv_base in invidious_hosts:
+        try:
+            LOGGER.info(f"  ├ 🔄 Пробую Invidious: {inv_base}...")
+            search_api = f"{inv_base}/api/v1/search?q={encoded_query}&type=video"
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(search_api, timeout=7) as resp:
+                    if resp.status != 200: continue
+                    v_list = await resp.json()
+                    if not v_list or not isinstance(v_list, list): continue
+
+                    video_id = v_list[0].get("videoId")
+                    v_title = v_list[0].get("title", clean_q)
+                    if not video_id: continue
+
+                    LOGGER.info(f"  ├ 🎵 Найдено на Invidious: '{v_title}' ({video_id})")
+                    await update_tg(f"⬇️ <b>Invidious:</b> скачиваю <code>{v_title}</code>...")
+
+                    # Получаем аудиопотоки видео
+                    vid_api = f"{inv_base}/api/v1/videos/{video_id}"
+                    async with session.get(vid_api, timeout=8) as v_resp:
+                        if v_resp.status != 200: continue
+                        v_meta = await v_resp.json()
+                        adaptive = v_meta.get("adaptiveFormats", [])
+                        audio_list = [af for af in adaptive if "audio" in (af.get("type") or "")]
+                        
+                        audio_url = None
+                        if audio_list:
+                            best_a = max(audio_list, key=lambda x: int(x.get("bitrate", 0)))
+                            audio_url = best_a.get("url")
+                        
+                        if not audio_url:
+                            audio_url = f"{inv_base}/latest_version?id={video_id}&itag=140"
+
+                        if audio_url:
+                            temp_in = target_file.with_suffix(".raw")
+                            async with session.get(audio_url, timeout=35) as dl_r:
+                                if dl_r.status == 200:
+                                    with open(temp_in, "wb") as f: f.write(await dl_r.read())
+                                    ffmpeg_bin = get_ffmpeg_path()
+                                    proc = await asyncio.create_subprocess_exec(
+                                        ffmpeg_bin, "-y", "-i", str(temp_in), "-vn", "-b:a", "320k", str(target_file),
+                                        stdout=asyncio.subprocess.DEVNULL,
+                                        stderr=asyncio.subprocess.DEVNULL
+                                    )
+                                    await proc.wait()
+                                    if temp_in.exists(): temp_in.unlink()
+
+                                    if target_file.exists() and target_file.stat().st_size > 500_000:
+                                        LOGGER.info(f"  └ 🎉 Успешно скачано через Invidious ({inv_base})!")
+                                        return True
+        except Exception as e:
+            LOGGER.info(f"  ├ ⚠️ Invidious {inv_base} пропущен: {e}")
+            continue
+
+    # 5. Актуальные Piped шлюзы
+    LOGGER.info(f"  ├ 🔴 [5/5] Подключаю Piped Gateway...")
+    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ SoundCloud: ❌\n├ 🔴 Invidious: ❌\n└ 🔴 <i>Piped Gateway...</i>")
 
     for instance in PIPED_INSTANCES:
         try:
-            LOGGER.info(f"  ├ 🔄 Пробую шлюз: {instance}...")
+            LOGGER.info(f"  ├ 🔄 Пробую Piped: {instance}...")
             search_api = f"{instance}/search?q={encoded_query}&filter=music_songs"
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(search_api, timeout=6) as resp:
@@ -258,8 +335,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
 
                     video_id = items[0].get("url", "").replace("/watch?v=", "")
                     track_name = items[0].get("title", clean_q)
-                    LOGGER.info(f"  ├ 🎵 Найдено на YouTube: '{track_name}' ({video_id})")
-                    await update_tg(f"⬇️ <b>YouTube Music:</b> скачиваю <code>{track_name}</code>...")
+                    LOGGER.info(f"  ├ 🎵 Найдено на Piped: '{track_name}' ({video_id})")
 
                     stream_api = f"{instance}/streams/{video_id}"
                     async with session.get(stream_api, timeout=8) as s_resp:
@@ -286,13 +362,13 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
                                     if temp_in.exists(): temp_in.unlink()
 
                                     if target_file.exists() and target_file.stat().st_size > 500_000:
-                                        LOGGER.info(f"  └ 🎉 Успешно скачано через YouTube Gateway ({instance})!")
+                                        LOGGER.info(f"  └ 🎉 Успешно скачано через Piped ({instance})!")
                                         return True
         except Exception as e:
-            LOGGER.info(f"  ├ ⚠️ Шлюз {instance} ответил ошибкой: {e}")
+            LOGGER.info(f"  ├ ⚠️ Piped {instance} пропущен: {e}")
             continue
 
-    LOGGER.warning(f"  └ ❌ Все 4 источника исчерпаны.")
+    LOGGER.warning(f"  └ ❌ Все 5 источников исчерпаны.")
     return False
 
 # --- ТЕГИРОВАНИЕ SPOTIFY ---
@@ -368,7 +444,12 @@ async def extract_info(url: str):
         'no_warnings': True,
         'skip_download': True,
         'format': UNIVERSAL_FORMAT,
-        'extractor_args': {'youtube': {'player_client': ['android', 'mweb', 'web']}}
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android_vr', 'ios', 'mweb'],
+                'player_skip': ['web']
+            }
+        }
     }
     loop = asyncio.get_event_loop()
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -437,7 +518,7 @@ def register(client, bot=None):
                                     except Exception: pass
                                 return
 
-            # 3. ДРУГИЕ ПЛАТФОРМЫ
+            # 3. YOUTUBE, SOUNDCLOUD, TIKTOK, INSTAGRAM
             import yt_dlp
             out_template = str(tmp_path / "%(title).50s.%(ext)s")
             ydl_opts = {
@@ -445,7 +526,12 @@ def register(client, bot=None):
                 'quiet': True,
                 'no_warnings': True,
                 'outtmpl': out_template,
-                'extractor_args': {'youtube': {'player_client': ['android', 'mweb', 'web']}}
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android_vr', 'ios', 'mweb'],
+                        'player_skip': ['web']
+                    }
+                }
             }
 
             if time_range:
