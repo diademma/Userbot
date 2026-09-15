@@ -27,6 +27,12 @@ jobs:
         with:
           python-version: '3.10'
 
+      # Настройка путей для локальных бинарников (FFmpeg)
+      - name: Configure System PATH
+        run: |
+          mkdir -p ~/.local/bin
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       # КЭШ FFMPEG В ДОМАШНЕЙ ПАПКЕ
       - name: Cache FFmpeg Binary
         id: cache-ffmpeg
@@ -49,7 +55,6 @@ jobs:
           SESSION_STRING: ${{ secrets.SESSION_STRING }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PATH: "/home/runner/.local/bin:${{ env.PATH }}"
         run: |
           (
             mkdir -p ~/.local/bin
@@ -71,8 +76,7 @@ jobs:
             echo "🎉 [ФОН] Все библиотеки готовы!"
           ) &
 
-          # Запуск бота с добавленным путем к ffmpeg
-          export PATH="$HOME/.local/bin:$PATH"
+          # Запуск бота
           timeout 20400s python app.py || true
 
           echo "⏳ Время смены караула. Перезапускаем воркфлоу..."
