@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v9.5 (Format Fix for web_embedded)
+# modules/downloader.py — Мультимедиа комбайн v10.0 (Deno / EJS Challenge Solver)
 import os
 import re
 import sys
@@ -31,7 +31,7 @@ COMMANDS = (
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
     "Мульти-поиск аудио:\n"
-    "├ 🍪 YouTube Authenticated (Прямой MP3 без ограничений)\n"
+    "├ 🍪 YouTube Authenticated (С решением JS n-challenge через Deno)\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
     "└ 🔴 Piped Stream (Резервный аудио-шлюз)"
@@ -45,7 +45,7 @@ LOGGER = logging.getLogger("MediaGrabber")
 SESSIONS = {}
 WAITING_TRIM = {}
 
-UNIVERSAL_FORMAT = "ba/b/best/bestvideo+bestaudio"
+UNIVERSAL_FORMAT = "ba/b/best"
 
 PIPED_INSTANCES = [
     "https://api.piped.private.coffee",
@@ -82,6 +82,17 @@ def get_ffmpeg_path():
     if os.path.isfile(home_p): return home_p
     return "ffmpeg"
 
+def get_js_runtimes_config() -> dict:
+    """Определяет путь к Deno или Node.js для решения n-challenge"""
+    runtimes = {}
+    deno_bin = shutil.which("deno") or os.path.expanduser("~/.deno/bin/deno")
+    if deno_bin and os.path.isfile(deno_bin):
+        runtimes["deno"] = {"path": deno_bin}
+    node_bin = shutil.which("node")
+    if node_bin:
+        runtimes["node"] = {"path": node_bin}
+    return runtimes
+
 def detect_platform(url: str) -> str:
     url_l = url.lower()
     if any(d in url_l for d in ("youtube.com", "youtu.be")): return "youtube"
@@ -95,12 +106,12 @@ def detect_platform(url: str) -> str:
 async def ensure_latest_ytdlp():
     try:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp",
+            sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp[default]",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL
         )
         await proc.wait()
-        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до актуальной версии.")
+        LOGGER.info("🚀 [MediaGrabber] yt-dlp[default] проверен и обновлен.")
     except Exception as e:
         LOGGER.warning(f"Ошибка обновления yt-dlp: {e}")
 
@@ -177,52 +188,38 @@ async def get_spotify_meta(url: str) -> dict | None:
 
     return {"title": title or "Track", "author": artist, "thumb": thumb} if title else None
 
-# --- ЗАГРУЗКА YOUTUBE ПО КУКАМ (УНИВЕРСАЛЬНЫЙ ФОРМАТ) ---
+# --- ЗАГРУЗКА YOUTUBE ЧЕРЕЗ DENO JS РЕШАТЕЛЬ ---
 async def download_auth_youtube(query_or_url: str, target_file: Path, cookie_path: str) -> bool:
     import yt_dlp
     loop = asyncio.get_event_loop()
     target = query_or_url if query_or_url.startswith("http") else f"ytsearch1:{query_or_url}"
 
-    client_profiles = [
-        ['default', '-tv_downgraded', '-tv', 'web_embedded'],
-        ['web_embedded', 'mweb', 'android'],
-        ['mweb', 'android']
-    ]
+    js_runtimes = get_js_runtimes_config()
+    LOGGER.info(f"  ├ ⚡ Доступные JS-рантаймы: {list(js_runtimes.keys())}")
 
-    for c_profile in client_profiles:
-        try:
-            LOGGER.info(f"  ├ 🍪 Пробую клиенты: {c_profile}...")
-            yt_opts = {
-                'ffmpeg_location': get_ffmpeg_path(),
-                'cookiefile': cookie_path,
-                'quiet': True,
-                'no_warnings': True,
-                # ИСПРАВЛЕНО: забираем любой стрим (звук или видео со звуком) и вырезаем MP3
-                'format': 'ba/b/best/bestvideo+bestaudio',
-                'outtmpl': str(target_file.with_suffix('')),
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': c_profile
-                    }
-                },
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '320',
-                }]
-            }
+    yt_opts = {
+        'ffmpeg_location': get_ffmpeg_path(),
+        'cookiefile': cookie_path,
+        'quiet': True,
+        'no_warnings': True,
+        'format': 'ba/b/best',
+        'outtmpl': str(target_file.with_suffix('')),
+        'js_runtimes': js_runtimes,
+        'remote_components': {'ejs:github'},
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
+    }
 
-            def run_dl():
-                with yt_dlp.YoutubeDL(yt_opts) as ydl:
-                    return ydl.extract_info(target, download=True)
+    try:
+        def run_dl():
+            with yt_dlp.YoutubeDL(yt_opts) as ydl:
+                return ydl.extract_info(target, download=True)
 
-            await loop.run_in_executor(None, run_dl)
-            if target_file.exists() and target_file.stat().st_size > 400_000:
-                LOGGER.info(f"  └ 🎉 Успешно скачано с YouTube по кукам!")
-                return True
-        except Exception as e:
-            LOGGER.info(f"  ├ ⚠️ Профиль {c_profile} ошибка: {e}")
-            continue
+        await loop.run_in_executor(None, run_dl)
+        if target_file.exists() and target_file.stat().st_size > 400_000:
+            LOGGER.info(f"  └ 🎉 Успешно скачано с YouTube через Deno!")
+            return True
+    except Exception as e:
+        LOGGER.info(f"  ├ ⚠️ Ошибка загрузки YouTube: {e}")
 
     return False
 
@@ -238,10 +235,10 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
 
     LOGGER.info(f"🔎 [Поиск] Старт поиска трека: '{clean_q}'")
 
-    # 1. YouTube по кукам
+    # 1. YouTube по кукам с решением JS n-challenge через Deno
     if cookie_path:
-        LOGGER.info(f"  ├ 🍪 [1/5] Скачиваю с YouTube по авторизации...")
-        await throttler.update(f"⬇️ <b>YouTube:</b> скачиваю по авторизации <code>{clean_q}</code>...", force=True)
+        LOGGER.info(f"  ├ 🍪 [1/5] Скачиваю с YouTube (Deno JS Solver)...")
+        await throttler.update(f"⬇️ <b>YouTube:</b> расшифровываю и скачиваю <code>{clean_q}</code>...", force=True)
         ok = await download_auth_youtube(clean_q, target_file, cookie_path)
         if ok: return True
 
@@ -318,7 +315,7 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
     except Exception as e:
         LOGGER.info(f"  ├ ⚠️ SoundCloud: {e}")
 
-    # 5. Piped поиск + Загрузка по найденному ID
+    # 5. Piped поиск + Загрузка
     LOGGER.info(f"  ├ 🔴 [5/5] Подключаю Piped Stream...")
     for instance in PIPED_INSTANCES:
         try:
@@ -446,16 +443,14 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
 async def extract_info(url: str):
     import yt_dlp
     cookie_path = get_cookies_file(Path(tempfile.gettempdir()))
+    js_runtimes = get_js_runtimes_config()
     opts = {
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
         'format': UNIVERSAL_FORMAT,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['default', '-tv_downgraded', '-tv', 'web_embedded']
-            }
-        }
+        'js_runtimes': js_runtimes,
+        'remote_components': {'ejs:github'},
     }
     if cookie_path:
         opts['cookiefile'] = cookie_path
@@ -524,17 +519,15 @@ def register(client, bot=None):
             import yt_dlp
             out_template = str(tmp_path / "%(title).50s.%(ext)s")
             cookie_file = get_cookies_file(tmp_path)
+            js_runtimes = get_js_runtimes_config()
 
             ydl_opts = {
                 'ffmpeg_location': ffmpeg_bin,
                 'quiet': True,
                 'no_warnings': True,
                 'outtmpl': out_template,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['default', '-tv_downgraded', '-tv', 'web_embedded']
-                    }
-                }
+                'js_runtimes': js_runtimes,
+                'remote_components': {'ejs:github'},
             }
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file
@@ -548,7 +541,7 @@ def register(client, bot=None):
             if action == "mp3" or platform == "soundcloud":
                 is_audio = True
                 ydl_opts.update({
-                    'format': 'ba/b/best/bestvideo+bestaudio',
+                    'format': 'ba/b/best',
                     'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
                 })
             elif action in ("144", "360", "720", "1080"):
