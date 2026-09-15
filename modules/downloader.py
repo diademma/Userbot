@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v5.0 (Live Invidious & Verified Piped Gateways)
+# modules/downloader.py — Мультимедиа комбайн v5.5 (Piped + Cobalt Stream Integration)
 import os
 import re
 import sys
@@ -29,14 +29,14 @@ COMMANDS = (
     "• sudo {ссылка} — Интерактивная карточка с превью и кнопками\n"
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
-    "Живой мульти-поиск аудио:\n"
+    "Мульти-поиск аудио:\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
-    "├ 🔴 Живой Invidious API (Парсинг с api.invidious.io)\n"
-    "└ 🔴 Проверенные Piped шлюзы (Privacy, Coffee, Owo)"
+    "├ 🔴 Piped API + Cobalt Engine (Мгновенный поиск + чистый MP3)\n"
+    "└ 🔴 Живой Invidious API"
 )
 
-# Заглушаем спам Telethon в консоли
+# Заглушаем спам Telethon
 for noisy in ("telethon.client.updates", "telethon.client.uploads", "telethon.network.mtprotosender"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -47,19 +47,22 @@ WAITING_TRIM = {}
 
 UNIVERSAL_FORMAT = "bv*+ba/b/bestvideo/bestaudio/best"
 
-# Только проверенные и работающие шлюзы
-PIPED_INSTANCES = [
-    "https://piped-api.privacy.com.de",
-    "https://pipedapi.reallyaweso.me",
+# Только живые рабочие шлюзы поиска YouTube
+PIPED_SEARCH_INSTANCES = [
     "https://api.piped.private.coffee",
-    "https://pipedapi.owo.si"
+    "https://pipedapi.reallyaweso.me",
+    "https://pipedapi.drgns.space"
 ]
 
-INVIDIOUS_FALLBACKS = [
+# Шлюзы Cobalt для прямой выгрузки аудио без блокировок
+COBALT_INSTANCES = [
+    "https://cobalt.meowing.de",
+    "https://cobalt.canine.tools"
+]
+
+INVIDIOUS_INSTANCES = [
     "https://inv.nadeko.net",
     "https://invidious.nerdvpn.de",
-    "https://yewtu.be",
-    "https://inv.thepixora.com",
     "https://invidious.tiekoetter.com"
 ]
 
@@ -88,7 +91,7 @@ async def ensure_latest_ytdlp():
             stderr=asyncio.subprocess.DEVNULL
         )
         await proc.wait()
-        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до актуальной версии.")
+        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до последней версии.")
     except Exception as e:
         LOGGER.warning(f"Ошибка обновления yt-dlp: {e}")
 
@@ -99,8 +102,7 @@ async def get_spotify_meta(url: str) -> dict | None:
         "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
     }
     m = re.search(r'spotify\.com/(track|album|playlist)/([a-zA-Z0-9]+)', url)
-    if not m:
-        return None
+    if not m: return None
 
     res_type, res_id = m.group(1), m.group(2)
     embed_url = f"https://open.spotify.com/embed/{res_type}/{res_id}"
@@ -133,9 +135,8 @@ async def get_spotify_meta(url: str) -> dict | None:
                         if m_og_title: title = m_og_title.group(1).strip()
                     if not artist:
                         m_og_desc = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html)
-                        if m_og_desc:
-                            desc = m_og_desc.group(1).strip()
-                            if "·" in desc: artist = desc.split("·")[0].strip()
+                        if m_og_desc and "·" in m_og_desc.group(1):
+                            artist = m_og_desc.group(1).split("·")[0].strip()
                     if not thumb:
                         m_og_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
                         if m_og_img: thumb = m_og_img.group(1).strip()
@@ -158,7 +159,44 @@ async def get_spotify_meta(url: str) -> dict | None:
 
     return {"title": title or "Track", "author": artist, "thumb": thumb} if title else None
 
-# --- МУЛЬТИ-ШЛЮЗ ПОИСКА АУДИО (ПОШАГОВЫЙ РАДАР) ---
+# --- ЗАГРУЗКА АУДИО ИЗ YOUTUBE ЧЕРЕЗ COBALT API ---
+async def download_yt_via_cobalt(video_id: str, target_file: Path) -> bool:
+    yt_url = f"https://www.youtube.com/watch?v={video_id}"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    payload = {
+        "url": yt_url,
+        "downloadMode": "audio",
+        "audioFormat": "mp3",
+        "audioBitrate": "320"
+    }
+
+    for c_host in COBALT_INSTANCES:
+        try:
+            LOGGER.info(f"  ├ ⚡ Пробую Cobalt шлюз: {c_host}...")
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(c_host, json=payload, timeout=12) as resp:
+                    if resp.status != 200: continue
+                    data = await resp.json(content_type=None)
+                    stream_url = data.get("url")
+                    if stream_url:
+                        LOGGER.info(f"  ├ ⬇️ Cobalt отдал прямой аудиопоток, скачиваю...")
+                        async with session.get(stream_url, timeout=35) as dl_r:
+                            if dl_r.status == 200:
+                                with open(target_file, "wb") as f: f.write(await dl_r.read())
+                                if target_file.exists() and target_file.stat().st_size > 400_000:
+                                    LOGGER.info(f"  └ 🎉 Успешно скачано через Cobalt ({c_host})!")
+                                    return True
+        except Exception as e:
+            LOGGER.info(f"  ├ ⚠️ Cobalt {c_host} пропущен: {e}")
+            continue
+
+    return False
+
+# --- МУЛЬТИ-ШЛЮЗ ПОИСКА АУДИО ---
 async def search_and_download_audio(query: str, target_file: Path, status_event=None) -> bool:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -175,7 +213,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
             except Exception: pass
 
     # 1. Hitmo
-    LOGGER.info(f"  ├ 🌐 [1/5] Проверяю Hitmo...")
+    LOGGER.info(f"  ├ 🌐 [1/4] Проверяю Hitmo...")
     await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 <i>Hitmo...</i>")
     try:
         hitmo_url = f"https://rus.hitmotop.com/search?q={encoded_query}"
@@ -198,11 +236,11 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
                                     LOGGER.info(f"  └ 🎉 Успешно скачано с Hitmo!")
                                     return True
     except Exception as e:
-        LOGGER.info(f"  ├ ⚠️ Hitmo ошибка: {e}")
+        LOGGER.info(f"  ├ ⚠️ Hitmo: {e}")
     LOGGER.info(f"  ├ ❌ Hitmo: трек не найден")
 
     # 2. Sefon
-    LOGGER.info(f"  ├ 🌐 [2/5] Проверяю Sefon...")
+    LOGGER.info(f"  ├ 🌐 [2/4] Проверяю Sefon...")
     await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 <i>Sefon...</i>")
     try:
         sefon_url = f"https://sefon.pro/search/?q={encoded_query}"
@@ -221,11 +259,11 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
                                     LOGGER.info(f"  └ 🎉 Успешно скачано с Sefon!")
                                     return True
     except Exception as e:
-        LOGGER.info(f"  ├ ⚠️ Sefon ошибка: {e}")
+        LOGGER.info(f"  ├ ⚠️ Sefon: {e}")
     LOGGER.info(f"  ├ ❌ Sefon: трек не найден")
 
     # 3. SoundCloud
-    LOGGER.info(f"  ├ ☁️ [3/5] Проверяю SoundCloud...")
+    LOGGER.info(f"  ├ ☁️ [3/4] Проверяю SoundCloud...")
     await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ <i>SoundCloud...</i>")
     try:
         import yt_dlp
@@ -247,128 +285,88 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
             LOGGER.info(f"  └ 🎉 Успешно скачано с SoundCloud!")
             return True
     except Exception as e:
-        LOGGER.info(f"  ├ ⚠️ SoundCloud ошибка: {e}")
+        LOGGER.info(f"  ├ ⚠️ SoundCloud: {e}")
     LOGGER.info(f"  ├ ❌ SoundCloud: трек не найден")
 
-    # 4. Живой Invidious API (с автоматическим подбором активных серверов)
-    LOGGER.info(f"  ├ 🔴 [4/5] Подключаю живой Invidious API...")
-    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ SoundCloud: ❌\n└ 🔴 <i>Invidious Gateway...</i>")
+    # 4. YouTube Поиск через Piped ➔ Скачивание через Cobalt / Invidious
+    LOGGER.info(f"  ├ 🔴 [4/4] Подключаю YouTube Gateway (Piped + Cobalt)...")
+    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ SoundCloud: ❌\n└ 🔴 <i>YouTube Gateway...</i>")
 
-    invidious_hosts = list(INVIDIOUS_FALLBACKS)
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get("https://api.invidious.io/instances.json?sort_by=type,health", timeout=5) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    live = [f"https://{item[0]}" for item in data if item[1].get("type") == "https" and item[1].get("api") and item[1].get("monitor", {}).get("status") == 200]
-                    if live: invidious_hosts = live[:4] + invidious_hosts
-    except Exception: pass
+    found_video_id = None
+    found_title = clean_q
 
-    for inv_base in invidious_hosts:
+    # Шаг А: Поиск video_id на Piped
+    for instance in PIPED_SEARCH_INSTANCES:
         try:
-            LOGGER.info(f"  ├ 🔄 Пробую Invidious: {inv_base}...")
-            search_api = f"{inv_base}/api/v1/search?q={encoded_query}&type=video"
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(search_api, timeout=7) as resp:
-                    if resp.status != 200: continue
-                    v_list = await resp.json()
-                    if not v_list or not isinstance(v_list, list): continue
-
-                    video_id = v_list[0].get("videoId")
-                    v_title = v_list[0].get("title", clean_q)
-                    if not video_id: continue
-
-                    LOGGER.info(f"  ├ 🎵 Найдено на Invidious: '{v_title}' ({video_id})")
-                    await update_tg(f"⬇️ <b>Invidious:</b> скачиваю <code>{v_title}</code>...")
-
-                    # Получаем аудиопотоки видео
-                    vid_api = f"{inv_base}/api/v1/videos/{video_id}"
-                    async with session.get(vid_api, timeout=8) as v_resp:
-                        if v_resp.status != 200: continue
-                        v_meta = await v_resp.json()
-                        adaptive = v_meta.get("adaptiveFormats", [])
-                        audio_list = [af for af in adaptive if "audio" in (af.get("type") or "")]
-                        
-                        audio_url = None
-                        if audio_list:
-                            best_a = max(audio_list, key=lambda x: int(x.get("bitrate", 0)))
-                            audio_url = best_a.get("url")
-                        
-                        if not audio_url:
-                            audio_url = f"{inv_base}/latest_version?id={video_id}&itag=140"
-
-                        if audio_url:
-                            temp_in = target_file.with_suffix(".raw")
-                            async with session.get(audio_url, timeout=35) as dl_r:
-                                if dl_r.status == 200:
-                                    with open(temp_in, "wb") as f: f.write(await dl_r.read())
-                                    ffmpeg_bin = get_ffmpeg_path()
-                                    proc = await asyncio.create_subprocess_exec(
-                                        ffmpeg_bin, "-y", "-i", str(temp_in), "-vn", "-b:a", "320k", str(target_file),
-                                        stdout=asyncio.subprocess.DEVNULL,
-                                        stderr=asyncio.subprocess.DEVNULL
-                                    )
-                                    await proc.wait()
-                                    if temp_in.exists(): temp_in.unlink()
-
-                                    if target_file.exists() and target_file.stat().st_size > 500_000:
-                                        LOGGER.info(f"  └ 🎉 Успешно скачано через Invidious ({inv_base})!")
-                                        return True
-        except Exception as e:
-            LOGGER.info(f"  ├ ⚠️ Invidious {inv_base} пропущен: {e}")
-            continue
-
-    # 5. Актуальные Piped шлюзы
-    LOGGER.info(f"  ├ 🔴 [5/5] Подключаю Piped Gateway...")
-    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ SoundCloud: ❌\n├ 🔴 Invidious: ❌\n└ 🔴 <i>Piped Gateway...</i>")
-
-    for instance in PIPED_INSTANCES:
-        try:
-            LOGGER.info(f"  ├ 🔄 Пробую Piped: {instance}...")
+            LOGGER.info(f"  ├ 🔄 Ищу на Piped ({instance})...")
             search_api = f"{instance}/search?q={encoded_query}&filter=music_songs"
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(search_api, timeout=6) as resp:
                     if resp.status != 200: continue
-                    data = await resp.json()
+                    if "json" not in resp.headers.get("Content-Type", "").lower(): continue
+                    data = await resp.json(content_type=None)
                     items = data.get("items", [])
                     if not items: continue
 
-                    video_id = items[0].get("url", "").replace("/watch?v=", "")
-                    track_name = items[0].get("title", clean_q)
-                    LOGGER.info(f"  ├ 🎵 Найдено на Piped: '{track_name}' ({video_id})")
-
-                    stream_api = f"{instance}/streams/{video_id}"
-                    async with session.get(stream_api, timeout=8) as s_resp:
-                        if s_resp.status != 200: continue
-                        s_data = await s_resp.json()
-                        audio_streams = s_data.get("audioStreams", [])
-                        if not audio_streams: continue
-
-                        best_audio = max(audio_streams, key=lambda x: x.get("bitrate", 0))
-                        audio_url = best_audio.get("url")
-
-                        if audio_url:
-                            temp_in = target_file.with_suffix(".raw")
-                            async with session.get(audio_url, timeout=35) as dl_r:
-                                if dl_r.status == 200:
-                                    with open(temp_in, "wb") as f: f.write(await dl_r.read())
-                                    ffmpeg_bin = get_ffmpeg_path()
-                                    proc = await asyncio.create_subprocess_exec(
-                                        ffmpeg_bin, "-y", "-i", str(temp_in), "-vn", "-b:a", "320k", str(target_file),
-                                        stdout=asyncio.subprocess.DEVNULL,
-                                        stderr=asyncio.subprocess.DEVNULL
-                                    )
-                                    await proc.wait()
-                                    if temp_in.exists(): temp_in.unlink()
-
-                                    if target_file.exists() and target_file.stat().st_size > 500_000:
-                                        LOGGER.info(f"  └ 🎉 Успешно скачано через Piped ({instance})!")
-                                        return True
-        except Exception as e:
-            LOGGER.info(f"  ├ ⚠️ Piped {instance} пропущен: {e}")
+                    found_video_id = items[0].get("url", "").replace("/watch?v=", "")
+                    found_title = items[0].get("title", clean_q)
+                    if found_video_id:
+                        LOGGER.info(f"  ├ 🎵 Успешно найден video_id: '{found_title}' ({found_video_id})")
+                        break
+        except Exception:
             continue
 
-    LOGGER.warning(f"  └ ❌ Все 5 источников исчерпаны.")
+    # Если Piped не нашёл, пробуем Invidious поиск
+    if not found_video_id:
+        for inv_base in INVIDIOUS_INSTANCES:
+            try:
+                LOGGER.info(f"  ├ 🔄 Ищу на Invidious ({inv_base})...")
+                search_api = f"{inv_base}/api/v1/search?q={encoded_query}&type=video"
+                async with aiohttp.ClientSession(headers=headers) as session:
+                    async with session.get(search_api, timeout=6) as resp:
+                        if resp.status != 200: continue
+                        if "json" not in resp.headers.get("Content-Type", "").lower(): continue
+                        v_list = await resp.json(content_type=None)
+                        if not v_list or not isinstance(v_list, list): continue
+                        found_video_id = v_list[0].get("videoId")
+                        found_title = v_list[0].get("title", clean_q)
+                        if found_video_id:
+                            LOGGER.info(f"  ├ 🎵 Invidious нашел video_id: '{found_title}' ({found_video_id})")
+                            break
+            except Exception:
+                continue
+
+    # Шаг Б: Если видео найдено — скачиваем аудиопоток через Cobalt
+    if found_video_id:
+        await update_tg(f"⬇️ <b>YouTube:</b> скачиваю <code>{found_title}</code>...")
+        ok = await download_yt_via_cobalt(found_video_id, target_file)
+        if ok: return True
+
+        # Резервный забор потока через Invidious itag=140 (m4a/audio)
+        for inv_base in INVIDIOUS_INSTANCES:
+            try:
+                LOGGER.info(f"  ├ 🔄 Пробую прямой поток Invidious ({inv_base})...")
+                audio_stream_url = f"{inv_base}/latest_version?id={found_video_id}&itag=140"
+                async with aiohttp.ClientSession(headers=headers) as s_inv:
+                    async with s_inv.get(audio_stream_url, timeout=30) as st_resp:
+                        if st_resp.status == 200:
+                            temp_in = target_file.with_suffix(".m4a")
+                            with open(temp_in, "wb") as f: f.write(await st_resp.read())
+                            ffmpeg_bin = get_ffmpeg_path()
+                            proc = await asyncio.create_subprocess_exec(
+                                ffmpeg_bin, "-y", "-i", str(temp_in), "-vn", "-b:a", "320k", str(target_file),
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL
+                            )
+                            await proc.wait()
+                            if temp_in.exists(): temp_in.unlink()
+                            if target_file.exists() and target_file.stat().st_size > 400_000:
+                                LOGGER.info(f"  └ 🎉 Успешно скачано через Invidious прямой поток!")
+                                return True
+            except Exception:
+                continue
+
+    LOGGER.warning(f"  └ ❌ Все источники исчерпаны.")
     return False
 
 # --- ТЕГИРОВАНИЕ SPOTIFY ---
@@ -444,12 +442,7 @@ async def extract_info(url: str):
         'no_warnings': True,
         'skip_download': True,
         'format': UNIVERSAL_FORMAT,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android_vr', 'ios', 'mweb'],
-                'player_skip': ['web']
-            }
-        }
+        'extractor_args': {'youtube': {'player_client': ['android', 'mweb', 'web']}}
     }
     loop = asyncio.get_event_loop()
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -526,12 +519,7 @@ def register(client, bot=None):
                 'quiet': True,
                 'no_warnings': True,
                 'outtmpl': out_template,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android_vr', 'ios', 'mweb'],
-                        'player_skip': ['web']
-                    }
-                }
+                'extractor_args': {'youtube': {'player_client': ['android', 'mweb', 'web']}}
             }
 
             if time_range:
