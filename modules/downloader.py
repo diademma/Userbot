@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v12.0 (Turbo Parallel Uploader)
+# modules/downloader.py — Мультимедиа комбайн v12.5 (Hybrid Turbo Uploader)
 import os
 import re
 import sys
@@ -6,6 +6,7 @@ import uuid
 import math
 import json
 import time
+import random
 import urllib.parse
 import binascii
 import shutil
@@ -20,10 +21,9 @@ from telethon.tl.types import (
     DocumentAttributeVideo,
     InputBotInlineResult,
     InputBotInlineMessageText,
-    InputFileBig,
-    InputFile
+    InputFileBig
 )
-from telethon.tl.functions.upload import SaveBigFilePartRequest, SaveFilePartRequest
+from telethon.tl.functions.upload import SaveBigFilePartRequest
 
 from core.config import OWNER_ID
 from core.db import is_authorized
@@ -34,7 +34,7 @@ COMMANDS = (
     "• sudo {ссылка} — Интерактивная карточка с превью и кнопками\n"
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
-    "⚡ Встроен Turbo-Uploader (Многопоточная отправка до 50 МБ/с)"
+    "⚡ Встроен Hybrid Turbo-Uploader (Многопоточная отправка до 50 МБ/с)"
 )
 
 # Глушим технический шум Telethon
@@ -62,23 +62,25 @@ PIPED_INSTANCES = [
     "https://pipedapi.leptons.xyz"
 ]
 
-# --- МНОГОПОТОЧНЫЙ ТУРБО-ЗАГРУЗЧИК В TELEGRAM ---
+# --- ГИБРИДНЫЙ ТУРБО-ЗАГРУЗЧИК В TELEGRAM ---
 async def fast_upload_file(client, file_path: Path, max_workers: int = 8):
-    """Параллельная загрузка файла в 8 потоков чанками по 512 КБ"""
+    """Гибридная загрузка: до 10 МБ — штатно за 1с, свыше 10 МБ — в 8 параллельных потоков по 512 КБ"""
     file_size = file_path.stat().st_size
-    part_size = 512 * 1024  # 512 KB
+
+    # 1. Для небольших файлов штатный метод Telethon работает моментально
+    if file_size <= 10 * 1024 * 1024:
+        return await client.upload_file(file_path)
+
+    # 2. Для больших файлов (>10 МБ) включаем турбо-параллелизацию
+    part_size = 512 * 1024  # 512 KB — максимальный чанк MTProto
     part_count = math.ceil(file_size / part_size)
-    file_id = client._get_random_int()
-    is_big = file_size > 10 * 1024 * 1024
+    file_id = random.getrandbits(63)  # Исправлено: чистый 63-битный ID
 
     sem = asyncio.Semaphore(max_workers)
 
     async def upload_part(part_index, data):
         async with sem:
-            if is_big:
-                req = SaveBigFilePartRequest(file_id, part_index, part_count, data)
-            else:
-                req = SaveFilePartRequest(file_id, part_index, data)
+            req = SaveBigFilePartRequest(file_id, part_index, part_count, data)
             await client(req)
 
     tasks = []
@@ -87,13 +89,8 @@ async def fast_upload_file(client, file_path: Path, max_workers: int = 8):
             data = f.read(part_size)
             tasks.append(upload_part(part_index, data))
 
-    # Отправляем все кусочки одновременно в 8 потоков
     await asyncio.gather(*tasks)
-
-    if is_big:
-        return InputFileBig(file_id, part_count, file_path.name)
-    else:
-        return InputFile(file_id, part_count, file_path.name, "")
+    return InputFileBig(file_id, part_count, file_path.name)
 
 class StatusThrottler:
     def __init__(self, event, interval=3.0):
@@ -570,7 +567,6 @@ def register(client, bot=None):
                 'extractor_args': YT_CLIENT_ARGS,
                 'js_runtimes': get_js_runtimes_config(),
                 'remote_components': {'ejs:github'},
-                # Быстрый запуск стрима видео в Telegram
                 'postprocessor_args': {'ffmpeg': ['-movflags', '+faststart']}
             }
             if cookie_file:
@@ -629,8 +625,8 @@ def register(client, bot=None):
             if time_range:
                 caption += f"\n✂️ Нарезка: <code>[{time_range[0]} - {time_range[1]}]</code>"
 
-            # ⚡ ТУРБО-ОТПРАВКА В 8 ПОТОКОВ (за секунды вместо минут!)
-            await throttler.update(f"🚀 <b>Многопоточная отправка в Telegram...</b>", force=True)
+            # ⚡ ГИБРИДНАЯ ОТПРАВКА
+            await throttler.update(f"🚀 <b>Отправка в Telegram...</b>", force=True)
             fast_media = await fast_upload_file(client, main_file, max_workers=8)
 
             await client.send_file(target_chat_id, file=fast_media, reply_to=reply_to_id, caption=caption, parse_mode="html", attributes=attrs)
