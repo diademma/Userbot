@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v9.0 (True -tv_downgraded Exclusion Fix)
+# modules/downloader.py — Мультимедиа комбайн v9.5 (Format Fix for web_embedded)
 import os
 import re
 import sys
@@ -31,13 +31,12 @@ COMMANDS = (
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
     "Мульти-поиск аудио:\n"
-    "├ 🍪 YouTube Authenticated (Без сломанного tv_downgraded)\n"
+    "├ 🍪 YouTube Authenticated (Прямой MP3 без ограничений)\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
     "└ 🔴 Piped Stream (Резервный аудио-шлюз)"
 )
 
-# Заглушаем системный спам Telethon
 for noisy in ("telethon.client.updates", "telethon.client.uploads", "telethon.network.mtprotosender"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -46,7 +45,7 @@ LOGGER = logging.getLogger("MediaGrabber")
 SESSIONS = {}
 WAITING_TRIM = {}
 
-UNIVERSAL_FORMAT = "bv*+ba/b/bestvideo/bestaudio/best"
+UNIVERSAL_FORMAT = "ba/b/best/bestvideo+bestaudio"
 
 PIPED_INSTANCES = [
     "https://api.piped.private.coffee",
@@ -178,34 +177,39 @@ async def get_spotify_meta(url: str) -> dict | None:
 
     return {"title": title or "Track", "author": artist, "thumb": thumb} if title else None
 
-# --- ЗАГРУЗКА YOUTUBE ПО КУКАМ С БЕЗОПАСНЫМИ КЛИЕНТАМИ ---
+# --- ЗАГРУЗКА YOUTUBE ПО КУКАМ (УНИВЕРСАЛЬНЫЙ ФОРМАТ) ---
 async def download_auth_youtube(query_or_url: str, target_file: Path, cookie_path: str) -> bool:
     import yt_dlp
     loop = asyncio.get_event_loop()
     target = query_or_url if query_or_url.startswith("http") else f"ytsearch1:{query_or_url}"
 
-    # Ротация профилей клиентов (строго с отключением -tv_downgraded)
     client_profiles = [
         ['default', '-tv_downgraded', '-tv', 'web_embedded'],
-        ['web_embedded', 'mweb', 'android']
+        ['web_embedded', 'mweb', 'android'],
+        ['mweb', 'android']
     ]
 
     for c_profile in client_profiles:
         try:
-            LOGGER.info(f"  ├ 🍪 Пробую клиенты YouTube: {c_profile}...")
+            LOGGER.info(f"  ├ 🍪 Пробую клиенты: {c_profile}...")
             yt_opts = {
                 'ffmpeg_location': get_ffmpeg_path(),
                 'cookiefile': cookie_path,
                 'quiet': True,
                 'no_warnings': True,
-                'format': 'ba/b/bestaudio/best',
+                # ИСПРАВЛЕНО: забираем любой стрим (звук или видео со звуком) и вырезаем MP3
+                'format': 'ba/b/best/bestvideo+bestaudio',
                 'outtmpl': str(target_file.with_suffix('')),
                 'extractor_args': {
                     'youtube': {
                         'player_client': c_profile
                     }
                 },
-                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '320',
+                }]
             }
 
             def run_dl():
@@ -214,7 +218,7 @@ async def download_auth_youtube(query_or_url: str, target_file: Path, cookie_pat
 
             await loop.run_in_executor(None, run_dl)
             if target_file.exists() and target_file.stat().st_size > 400_000:
-                LOGGER.info(f"  └ 🎉 Успешно скачано по кукам (профиль: {c_profile})!")
+                LOGGER.info(f"  └ 🎉 Успешно скачано с YouTube по кукам!")
                 return True
         except Exception as e:
             LOGGER.info(f"  ├ ⚠️ Профиль {c_profile} ошибка: {e}")
@@ -234,7 +238,7 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
 
     LOGGER.info(f"🔎 [Поиск] Старт поиска трека: '{clean_q}'")
 
-    # 1. YouTube по кукам через чистый web_embedded без tv_downgraded
+    # 1. YouTube по кукам
     if cookie_path:
         LOGGER.info(f"  ├ 🍪 [1/5] Скачиваю с YouTube по авторизации...")
         await throttler.update(f"⬇️ <b>YouTube:</b> скачиваю по авторизации <code>{clean_q}</code>...", force=True)
@@ -325,7 +329,6 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
                     data = await resp.json(content_type=None)
                     items = data.get("items", [])
 
-                    # Если фильтр музыки пуст — пробуем общий поиск
                     if not items:
                         search_api_all = f"{instance}/search?q={encoded_query}"
                         async with session.get(search_api_all, timeout=7) as r_all:
@@ -340,12 +343,10 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
 
                     LOGGER.info(f"  ├ 🎵 Найдено на Piped: '{items[0].get('title')}' ({found_video_id})")
 
-                    # Если куки есть — сразу качаем этот конкретный найденный ролик через обход
                     if cookie_path:
                         ok = await download_auth_youtube(f"https://www.youtube.com/watch?v={found_video_id}", target_file, cookie_path)
                         if ok: return True
 
-                    # Либо забираем поток через прокси самого Piped
                     stream_api = f"{instance}/streams/{found_video_id}"
                     async with session.get(stream_api, timeout=10) as s_resp:
                         if s_resp.status == 200 and "json" in s_resp.headers.get("Content-Type", "").lower():
@@ -547,7 +548,7 @@ def register(client, bot=None):
             if action == "mp3" or platform == "soundcloud":
                 is_audio = True
                 ydl_opts.update({
-                    'format': 'bestaudio/best',
+                    'format': 'ba/b/best/bestvideo+bestaudio',
                     'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
                 })
             elif action in ("144", "360", "720", "1080"):
