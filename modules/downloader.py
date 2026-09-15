@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v7.5 (Piped Direct Stream + Safari Client Bypass)
+# modules/downloader.py — Мультимедиа комбайн v8.0 (Authenticated Engine)
 import os
 import re
 import sys
@@ -31,12 +31,12 @@ COMMANDS = (
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
     "Мульти-поиск аудио:\n"
+    "├ 🍪 YouTube Authenticated (Прямой доступ по кукам)\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
-    "└ 🔴 Piped Stream + Safari Bypass (YouTube без капчи)"
+    "└ 🔴 Piped Stream (Резервный аудио-шлюз)"
 )
 
-# Глушим технический спам Telethon
 for noisy in ("telethon.client.updates", "telethon.client.uploads", "telethon.network.mtprotosender"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -104,13 +104,12 @@ async def ensure_latest_ytdlp():
     except Exception as e:
         LOGGER.warning(f"Ошибка обновления yt-dlp: {e}")
 
-# Проверяем наличие YouTube куков в переменных окружения
-def setup_cookies(tmp_dir: Path) -> str | None:
-    cookies_content = os.getenv("YT_COOKIES") or os.getenv("YOUTUBE_COOKIES")
-    if cookies_content and len(cookies_content.strip()) > 50:
-        c_path = tmp_dir / "cookies.txt"
+def get_cookies_file(tmp_dir: Path) -> str | None:
+    raw_cookies = os.getenv("YT_COOKIES") or os.getenv("YOUTUBE_COOKIES")
+    if raw_cookies and len(raw_cookies.strip()) > 30:
+        c_path = tmp_dir / "yt_cookies.txt"
         with open(c_path, "w", encoding="utf-8") as f:
-            f.write(cookies_content.strip())
+            f.write(raw_cookies.strip() + "\n")
         return str(c_path)
     return None
 
@@ -178,49 +177,6 @@ async def get_spotify_meta(url: str) -> dict | None:
 
     return {"title": title or "Track", "author": artist, "thumb": thumb} if title else None
 
-# --- ЗАГРУЗКА АУДИО ИЗ YOUTUBE (САФАРИ-КЛИЕНТ + КУКИ) ---
-async def download_youtube_safari(video_id: str, target_file: Path) -> bool:
-    """Качает аудио с YouTube через Safari HLS клиент (обход анти-бота)"""
-    import yt_dlp
-    loop = asyncio.get_event_loop()
-    yt_url = f"https://www.youtube.com/watch?v={video_id}"
-
-    cookies_file = setup_cookies(target_file.parent)
-
-    yt_opts = {
-        'ffmpeg_location': get_ffmpeg_path(),
-        'quiet': True,
-        'no_warnings': True,
-        'format': 'ba/b/bestaudio/best',
-        'outtmpl': str(target_file.with_suffix('')),
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['web_safari', 'tv_downgraded', 'android_vr'],
-                'player_skip': ['web', 'mweb', 'android']
-            }
-        },
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '320',
-        }]
-    }
-    if cookies_file:
-        yt_opts['cookiefile'] = cookies_file
-
-    try:
-        def run_dl():
-            with yt_dlp.YoutubeDL(yt_opts) as ydl:
-                return ydl.extract_info(yt_url, download=True)
-
-        await loop.run_in_executor(None, run_dl)
-        if target_file.exists() and target_file.stat().st_size > 400_000:
-            return True
-    except Exception as e:
-        LOGGER.info(f"  ├ ⚠️ Safari-клиент YouTube: {e}")
-
-    return False
-
 # --- МУЛЬТИ-ШЛЮЗ ПОИСКА АУДИО ---
 async def search_and_download_audio(query: str, target_file: Path, throttler: StatusThrottler) -> bool:
     headers = {
@@ -229,11 +185,39 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
     }
     clean_q = re.sub(r"\s+", " ", query).strip()
     encoded_query = urllib.parse.quote(clean_q)
+    cookie_path = get_cookies_file(target_file.parent)
 
     LOGGER.info(f"🔎 [Поиск] Старт поиска трека: '{clean_q}'")
 
-    # 1. Hitmo
-    LOGGER.info(f"  ├ 🌐 [1/4] Проверяю Hitmo...")
+    # 1. Если куки присутствуют — качаем напрямую из YouTube (100% надёжность)
+    if cookie_path:
+        LOGGER.info(f"  ├ 🍪 [1/5] Проверяю YouTube с авторизацией по кукам...")
+        await throttler.update(f"⬇️ <b>YouTube:</b> скачиваю через авторизацию <code>{clean_q}</code>...", force=True)
+        try:
+            import yt_dlp
+            loop = asyncio.get_event_loop()
+            yt_opts = {
+                'ffmpeg_location': get_ffmpeg_path(),
+                'cookiefile': cookie_path,
+                'quiet': True,
+                'no_warnings': True,
+                'format': 'ba/b/bestaudio/best',
+                'outtmpl': str(target_file.with_suffix('')),
+                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
+            }
+            def run_auth_yt():
+                with yt_dlp.YoutubeDL(yt_opts) as ydl:
+                    return ydl.extract_info(f"ytsearch1:{clean_q}", download=True)
+
+            await loop.run_in_executor(None, run_auth_yt)
+            if target_file.exists() and target_file.stat().st_size > 400_000:
+                LOGGER.info(f"  └ 🎉 Успешно скачано с YouTube по кукам!")
+                return True
+        except Exception as e:
+            LOGGER.info(f"  ├ ⚠️ Ошибка загрузки по кукам: {e}")
+
+    # 2. Hitmo
+    LOGGER.info(f"  ├ 🌐 [2/5] Проверяю Hitmo...")
     await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 <i>Hitmo...</i>")
     try:
         hitmo_url = f"https://rus.hitmotop.com/search?q={encoded_query}"
@@ -257,10 +241,9 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
                                     return True
     except Exception as e:
         LOGGER.info(f"  ├ ⚠️ Hitmo: {e}")
-    LOGGER.info(f"  ├ ❌ Hitmo: трек не найден")
 
-    # 2. Sefon
-    LOGGER.info(f"  ├ 🌐 [2/4] Проверяю Sefon...")
+    # 3. Sefon
+    LOGGER.info(f"  ├ 🌐 [3/5] Проверяю Sefon...")
     await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 <i>Sefon...</i>")
     try:
         sefon_url = f"https://sefon.pro/search/?q={encoded_query}"
@@ -280,10 +263,9 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
                                     return True
     except Exception as e:
         LOGGER.info(f"  ├ ⚠️ Sefon: {e}")
-    LOGGER.info(f"  ├ ❌ Sefon: трек не найден")
 
-    # 3. SoundCloud
-    LOGGER.info(f"  ├ ☁️ [3/4] Проверяю SoundCloud...")
+    # 4. SoundCloud
+    LOGGER.info(f"  ├ ☁️ [4/5] Проверяю SoundCloud...")
     await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ ☁️ <i>SoundCloud...</i>")
     try:
         import yt_dlp
@@ -306,43 +288,22 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
             return True
     except Exception as e:
         LOGGER.info(f"  ├ ⚠️ SoundCloud: {e}")
-    LOGGER.info(f"  ├ ❌ SoundCloud: трек не найден")
 
-    # 4. Piped Stream Proxy ➔ Safari Bypass
-    LOGGER.info(f"  ├ 🔴 [4/4] Подключаю YouTube Piped Stream + Safari Bypass...")
-    await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n└ 🔴 <i>YouTube Gateway...</i>", force=True)
-
-    found_video_id = None
-    found_title = clean_q
-
+    # 5. Резервный Piped Stream Proxy
+    LOGGER.info(f"  ├ 🔴 [5/5] Подключаю резервный Piped Stream...")
     for instance in PIPED_INSTANCES:
         try:
-            LOGGER.info(f"  ├ 🔄 Ищу на Piped ({instance})...")
             search_api = f"{instance}/search?q={encoded_query}&filter=music_songs"
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(search_api, timeout=7) as resp:
-                    if resp.status != 200: continue
-                    if "json" not in resp.headers.get("Content-Type", "").lower(): continue
+                    if resp.status != 200 or "json" not in resp.headers.get("Content-Type", "").lower(): continue
                     data = await resp.json(content_type=None)
                     items = data.get("items", [])
-
-                    if not items:
-                        search_api_all = f"{instance}/search?q={encoded_query}"
-                        async with session.get(search_api_all, timeout=7) as r_all:
-                            if r_all.status == 200 and "json" in r_all.headers.get("Content-Type", "").lower():
-                                d_all = await r_all.json(content_type=None)
-                                items = d_all.get("items", [])
-
                     if not items: continue
 
                     found_video_id = items[0].get("url", "").replace("/watch?v=", "")
-                    found_title = items[0].get("title", clean_q)
                     if not found_video_id: continue
 
-                    LOGGER.info(f"  ├ 🎵 Найдено на Piped: '{found_title}' ({found_video_id})")
-                    await throttler.update(f"⬇️ <b>Piped:</b> скачиваю <code>{found_title}</code>...")
-
-                    # СПОСОБ А: Скачиваем поток через прокси самого Piped
                     stream_api = f"{instance}/streams/{found_video_id}"
                     async with session.get(stream_api, timeout=10) as s_resp:
                         if s_resp.status == 200 and "json" in s_resp.headers.get("Content-Type", "").lower():
@@ -352,7 +313,6 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
                                 best_audio = max(audio_streams, key=lambda x: int(x.get("bitrate") or 0))
                                 audio_url = best_audio.get("url")
                                 if audio_url:
-                                    LOGGER.info(f"  ├ ⚡ Качаю поток через Piped Proxy...")
                                     temp_raw = target_file.with_suffix(".raw")
                                     async with session.get(audio_url, timeout=40) as dl_r:
                                         if dl_r.status == 200:
@@ -365,20 +325,10 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
                                             )
                                             await proc.wait()
                                             if temp_raw.exists(): temp_raw.unlink()
-
                                             if target_file.exists() and target_file.stat().st_size > 400_000:
                                                 LOGGER.info(f"  └ 🎉 Успешно скачано через Piped Proxy!")
                                                 return True
-
-                    # СПОСОБ Б: Если Piped не отдал поток — запускаем Safari Client Bypass
-                    LOGGER.info(f"  ├ ⚡ Пробую прямой обход YouTube через Safari HLS...")
-                    ok = await download_youtube_safari(found_video_id, target_file)
-                    if ok:
-                        LOGGER.info(f"  └ 🎉 Успешно скачано через Safari HLS Bypass!")
-                        return True
-
-        except Exception as e:
-            LOGGER.info(f"  ├ ⚠️ Ошибка Piped {instance}: {e}")
+        except Exception:
             continue
 
     LOGGER.warning(f"  └ ❌ Все источники исчерпаны.")
@@ -452,18 +402,18 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
 
 async def extract_info(url: str):
     import yt_dlp
+    cookie_path = get_cookies_file(Path(tempfile.gettempdir()))
     opts = {
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
         'format': UNIVERSAL_FORMAT,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['web_safari', 'tv_downgraded', 'android_vr'],
-                'player_skip': ['web', 'mweb', 'android']
-            }
-        }
     }
+    if cookie_path:
+        opts['cookiefile'] = cookie_path
+    else:
+        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'mweb', 'web']}}
+
     loop = asyncio.get_event_loop()
     with yt_dlp.YoutubeDL(opts) as ydl:
         return await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
@@ -527,22 +477,16 @@ def register(client, bot=None):
             # 3. YOUTUBE, SOUNDCLOUD, TIKTOK, INSTAGRAM
             import yt_dlp
             out_template = str(tmp_path / "%(title).50s.%(ext)s")
-            cookies_file = setup_cookies(tmp_path)
+            cookie_file = get_cookies_file(tmp_path)
 
             ydl_opts = {
                 'ffmpeg_location': ffmpeg_bin,
                 'quiet': True,
                 'no_warnings': True,
                 'outtmpl': out_template,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['web_safari', 'tv_downgraded', 'android_vr'],
-                        'player_skip': ['web', 'mweb', 'android']
-                    }
-                }
             }
-            if cookies_file:
-                ydl_opts['cookiefile'] = cookies_file
+            if cookie_file:
+                ydl_opts['cookiefile'] = cookie_file
 
             if time_range:
                 ydl_opts['download_ranges'] = yt_dlp.utils.download_range_func(None, [(time_range[0], time_range[1])])
