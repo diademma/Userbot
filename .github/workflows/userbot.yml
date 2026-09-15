@@ -35,11 +35,12 @@ jobs:
           path: ~/.local/bin/ffmpeg
           key: ${{ runner.os }}-ffmpeg-home-v1
 
-      # Быстрый старт ядра
-      - name: Fast Install Core
+      # Быстрый старт ядра + свежайший yt-dlp
+      - name: Fast Install Core & Downloader Engine
         run: |
           python -m pip install --upgrade pip
-          pip install telethon
+          pip install telethon aiohttp mutagen
+          pip install -U yt-dlp
 
       - name: Run 🪐 𝗣𝗿𝗼𝘅𝗶𝗺𝗮 LLEHTABPA with Background Heavy Install
         env:
@@ -48,6 +49,7 @@ jobs:
           SESSION_STRING: ${{ secrets.SESSION_STRING }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PATH: "/home/runner/.local/bin:${{ env.PATH }}"
         run: |
           (
             mkdir -p ~/.local/bin
@@ -64,12 +66,13 @@ jobs:
               echo "🎬 [ФОН] FFmpeg взят из кэша!"
             fi
 
-            echo "📦 [ФОН] Устанавливаю библиотеки (включая ONNX Runtime для 4K AI)..."
+            echo "📦 [ФОН] Устанавливаю тяжелые библиотеки..."
             pip install rlottie-python pillow opencv-python-headless numpy requests pilmoji onnxruntime
             echo "🎉 [ФОН] Все библиотеки готовы!"
           ) &
 
-          # Запуск бота
+          # Запуск бота с добавленным путем к ffmpeg
+          export PATH="$HOME/.local/bin:$PATH"
           timeout 20400s python app.py || true
 
           echo "⏳ Время смены караула. Перезапускаем воркфлоу..."
