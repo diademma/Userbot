@@ -1,7 +1,7 @@
-# modules/quote_stickers.py — Генератор 3D-видеостикеров v3.0 (Pure PIL Engine / No-CV2)
+# modules/quote_stickers.py — Генератор 3D-видеостикеров v3.5 (No-Pipes / Pure Stability)
 import os
 import re
-import math
+import shutil
 import random
 import sqlite3
 import logging
@@ -10,12 +10,10 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime
 import asyncio
-import subprocess
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# Поддержка эмодзи Apple / iOS
 try:
     from pilmoji import Pilmoji
     from pilmoji.source import AppleEmojiSource
@@ -87,6 +85,13 @@ TEMPLATES = {
     }
 }
 
+def get_ffmpeg_path():
+    p = shutil.which("ffmpeg")
+    if p: return p
+    home_p = os.path.expanduser("~/.local/bin/ffmpeg")
+    if os.path.isfile(home_p): return home_p
+    return "ffmpeg"
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -143,7 +148,6 @@ def get_font_path():
                 
     return str(font_path)
 
-# Матричный расчет коэффициентов проекции для чистого PIL
 def find_perspective_coeffs(source_coords, target_coords):
     matrix = []
     for (x, y), (X, Y) in zip(source_coords, target_coords):
@@ -156,7 +160,6 @@ def find_perspective_coeffs(source_coords, target_coords):
     res = np.dot(np.linalg.inv(A.T * A) * A.T, B)
     return np.array(res).reshape(8)
 
-# Рендер текста на карточке через чистый Pillow
 def render_text_plate(text: str, card_w=400, card_h=300) -> Image.Image:
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -240,109 +243,97 @@ async def generate_quote_sticker(text: str, template_num: int, output_file: str)
         LOGGER.error(f"Шаблон {template_path} не найден!")
         return False
 
+    ffmpeg_bin = get_ffmpeg_path()
     card_w, card_h = 400, 300
     plate_img = render_text_plate(text, card_w=card_w, card_h=card_h)
     src_corners = [(0, 0), (card_w, 0), (card_w, card_h), (0, card_h)]
 
-    # Получаем FPS и длительность шаблона через ffprobe
-    fps = 25.0
-    try:
-        cmd_fps = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1", template_path]
-        proc_fps = await asyncio.create_subprocess_exec(*cmd_fps, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await proc_fps.communicate()
-        num, den = out.decode().strip().split('/')
-        fps = float(num) / float(den)
-    except Exception:
-        pass
+    with tempfile.TemporaryDirectory() as work_dir:
+        work_path = Path(work_dir)
+        frames_in_dir = work_path / "in"
+        frames_out_dir = work_path / "out"
+        frames_in_dir.mkdir()
+        frames_out_dir.mkdir()
 
-    # Извлекаем кадры в память через ffmpeg пайп (RGB24)
-    ffmpeg_in_cmd = [
-        "ffmpeg", "-hide_banner", "-i", template_path,
-        "-vf", "scale=512:512",
-        "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
-    ]
-    proc_in = await asyncio.create_subprocess_exec(*ffmpeg_in_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        # 1. Распаковываем шаблон в кадры (без зависаний и дедлоков)
+        extract_cmd = [
+            ffmpeg_bin, "-hide_banner", "-y",
+            "-i", template_path,
+            "-vf", "scale=512:512",
+            str(frames_in_dir / "f_%04d.png")
+        ]
+        proc = await asyncio.create_subprocess_exec(*extract_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await proc.wait()
 
-    # Запускаем кодировщик WebM (VP9)
-    ffmpeg_out_cmd = [
-        'ffmpeg', '-hide_banner', '-y',
-        '-f', 'rawvideo', '-vcodec', 'rawvideo',
-        '-s', '512x512', '-pix_fmt', 'rgba', '-r', str(fps),
-        '-i', '-',
-        '-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '250k',
-        '-pix_fmt', 'yuva420p', '-an', '-fs', '250K',
-        output_file
-    ]
-    proc_out = await asyncio.create_subprocess_exec(*ffmpeg_out_cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        frame_files = sorted(list(frames_in_dir.glob("f_*.png")))
+        if not frame_files:
+            LOGGER.error("FFmpeg не смог извлечь кадры шаблона.")
+            return False
 
-    start_t = cfg["start_time"]
-    end_t = cfg["end_time"]
-    is_static = cfg.get("is_static", False)
+        fps = 25.0
+        start_t = cfg["start_time"]
+        end_t = cfg["end_time"]
+        is_static = cfg.get("is_static", False)
 
-    frame_idx = 0
-    frame_bytes = 512 * 512 * 3
+        # 2. Обработка кадров в Pillow
+        for idx, fpath in enumerate(frame_files):
+            cur_t = idx / fps
+            frame_img = Image.open(fpath).convert("RGBA")
 
-    while True:
-        raw_frame = await proc_in.stdout.readexactly(frame_bytes) if not proc_in.stdout.at_eof() else None
-        if not raw_frame or len(raw_frame) < frame_bytes:
-            break
+            # Хромакей белого фона
+            arr = np.array(frame_img)
+            white_mask = (arr[:, :, 0] > 240) & (arr[:, :, 1] > 240) & (arr[:, :, 2] > 240)
+            arr[white_mask, 3] = 0
+            frame_img = Image.fromarray(arr)
 
-        cur_t = frame_idx / fps
-        frame_img = Image.frombytes("RGB", (512, 512), raw_frame).convert("RGBA")
-
-        # Удаление чисто белого фона вокруг девочки (хромакей)
-        arr = np.array(frame_img)
-        white_mask = (arr[:, :, 0] > 240) & (arr[:, :, 1] > 240) & (arr[:, :, 2] > 240)
-        arr[white_mask, 3] = 0
-        frame_img = Image.fromarray(arr)
-
-        # Наложение 3D таблички
-        if start_t <= cur_t <= end_t:
-            if is_static:
-                dst_corners = cfg["pose_1"]["corners"]
-                fingers = cfg["pose_1"]["fingers"]
-            else:
-                p1, p2 = cfg["pose_1"], cfg["pose_2"]
-                if cur_t <= p1["time_sec"]:
-                    dst_corners, fingers = p1["corners"], p1["fingers"]
-                elif cur_t >= p2["time_sec"]:
-                    dst_corners, fingers = p2["corners"], p2["fingers"]
+            # Наложение 3D-таблички
+            if start_t <= cur_t <= end_t:
+                if is_static:
+                    dst_corners = cfg["pose_1"]["corners"]
+                    fingers = cfg["pose_1"]["fingers"]
                 else:
-                    factor = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
-                    dst_corners = [
-                        (int(p1["corners"][k][0] + (p2["corners"][k][0] - p1["corners"][k][0]) * factor),
-                         int(p1["corners"][k][1] + (p2["corners"][k][1] - p1["corners"][k][1]) * factor))
-                        for k in range(4)
-                    ]
-                    fingers = p2["fingers"] if factor > 0.5 else p1["fingers"]
+                    p1, p2 = cfg["pose_1"], cfg["pose_2"]
+                    if cur_t <= p1["time_sec"]:
+                        dst_corners, fingers = p1["corners"], p1["fingers"]
+                    elif cur_t >= p2["time_sec"]:
+                        dst_corners, fingers = p2["corners"], p2["fingers"]
+                    else:
+                        factor = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
+                        dst_corners = [
+                            (int(p1["corners"][k][0] + (p2["corners"][k][0] - p1["corners"][k][0]) * factor),
+                             int(p1["corners"][k][1] + (p2["corners"][k][1] - p1["corners"][k][1]) * factor))
+                            for k in range(4)
+                        ]
+                        fingers = p2["fingers"] if factor > 0.5 else p1["fingers"]
 
-            # Расчет перспективы в чистом Pillow
-            coeffs = find_perspective_coeffs(src_corners, dst_corners)
-            transformed_plate = plate_img.transform((512, 512), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
+                coeffs = find_perspective_coeffs(src_corners, dst_corners)
+                transformed_plate = plate_img.transform((512, 512), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
 
-            # Вырезаем пальчики поверх таблички
-            if len(fingers) >= 3:
-                f_mask = Image.new("L", (512, 512), 255)
-                draw_f = ImageDraw.Draw(f_mask)
-                draw_f.polygon(fingers, fill=0)
-                transformed_plate.putalpha(Image.composite(transformed_plate.getchannel("A"), f_mask, f_mask))
+                if len(fingers) >= 3:
+                    f_mask = Image.new("L", (512, 512), 255)
+                    draw_f = ImageDraw.Draw(f_mask)
+                    draw_f.polygon(fingers, fill=0)
+                    transformed_plate.putalpha(Image.composite(transformed_plate.getchannel("A"), f_mask, f_mask))
 
-            frame_img.alpha_composite(transformed_plate)
+                frame_img.alpha_composite(transformed_plate)
 
-        try:
-            proc_out.stdin.write(frame_img.tobytes())
-            await proc_out.stdin.drain()
-        except Exception:
-            break
+            frame_img.save(frames_out_dir / f"out_{idx:04d}.png")
 
-        frame_idx += 1
-
-    try:
-        proc_out.stdin.close()
-        await proc_out.wait()
-        await proc_in.wait()
-    except Exception:
-        pass
+        # 3. Сборка WebM стикера
+        compile_cmd = [
+            ffmpeg_bin, "-hide_banner", "-y",
+            "-framerate", str(fps),
+            "-i", str(frames_out_dir / "out_%04d.png"),
+            "-c:v", "libvpx-vp9",
+            "-crf", "30",
+            "-b:v", "250k",
+            "-pix_fmt", "yuva420p",
+            "-an",
+            "-fs", "250K",
+            output_file
+        ]
+        proc = await asyncio.create_subprocess_exec(*compile_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await proc.wait()
 
     return os.path.exists(output_file) and os.path.getsize(output_file) > 1000
 
