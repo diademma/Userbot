@@ -1,9 +1,9 @@
-# modules/downloader.py — Ультимативный мультимедиа комбайн v2.0 (Pinterest Video Fix + SoundCloud)
+# modules/downloader.py — Ультимативный мультимедиа комбайн v2.5 (Pure Inline Flow)
 import os
 import re
 import sys
 import uuid
-import json
+import binascii
 import shutil
 import asyncio
 import logging
@@ -11,16 +11,20 @@ import tempfile
 import aiohttp
 from pathlib import Path
 from telethon import events, Button
-from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
+from telethon.tl.types import (
+    DocumentAttributeAudio,
+    DocumentAttributeVideo,
+    InputBotInlineResult,
+    InputBotInlineMessageText
+)
 
 from core.config import OWNER_ID
 from core.db import is_authorized
 
-# --- ОБЯЗАТЕЛЬНЫЕ МЕТАДАННЫЕ API ДЛЯ ЯДРА ---
 TITLE = "⤓ Media Grabber Pro"
 BANNER = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
 COMMANDS = (
-    "• sudo {ссылка} — Интерактивное меню скачивания\n"
+    "• sudo {ссылка} — Интерактивное меню скачивания через инлайн-бота\n"
     "• .dl {ссылка} — Альтернативный вызов меню\n"
     "• .dl {ссылка} [00:10-00:40] — Быстрая нарезка\n\n"
     "Поддерживаемые платформы:\n"
@@ -37,7 +41,6 @@ LOGGER = logging.getLogger("MediaGrabber")
 SESSIONS = {}
 WAITING_TRIM = {}
 
-# Селектор форматов, который НИКОГДА не падает из-за отсутствия аудио
 UNIVERSAL_FORMAT = "bv*+ba/b/bestvideo/bestaudio/best"
 
 def get_ffmpeg_path():
@@ -93,18 +96,15 @@ async def get_spotify_meta(url: str) -> dict | None:
     return None
 
 async def resolve_pinterest_pin(raw_url: str) -> dict:
-    """Глубокий анализ Pinterest: поддержка видео со звуком, без звука и HD фото"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    # 1. Попытка через yt-dlp с отказоустойчивым форматом
     try:
         info = await extract_info(raw_url)
         if info:
             formats = info.get("formats", [])
-            # Если есть видеопоток
             has_vid = any(f.get("vcodec") and f.get("vcodec") != "none" for f in formats) or info.get("vcodec") != "none"
             if has_vid or "video" in str(info.get("ext", "")):
                 return {
@@ -117,14 +117,12 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
     except Exception as e:
         LOGGER.warning(f"yt-dlp pinterest note: {e}")
 
-    # 2. Прямой HTML-парсинг видеопотоков v.pinimg.com и оригиналов фото
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(raw_url, allow_redirects=True, timeout=10) as resp:
                 if resp.status == 200:
                     html = await resp.text()
 
-                    # Поиск прямого mp4 в v.pinimg.com
                     m_vpin = re.search(r'https://v\.pinimg\.com/videos/[^\s"\'<>]+\.mp4', html)
                     if m_vpin:
                         return {
@@ -134,7 +132,6 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
                             "thumb": None
                         }
 
-                    # Поиск m3u8 в v.pinimg.com
                     m_m3u8 = re.search(r'https://v\.pinimg\.com/videos/[^\s"\'<>]+\.m3u8', html)
                     if m_m3u8:
                         return {
@@ -144,7 +141,6 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
                             "thumb": None
                         }
 
-                    # Поиск в OpenGraph
                     m_vid = re.search(r'<meta\s+property=["\']og:video(?::secure_url)?["\']\s+content=["\']([^"\']+)["\']', html)
                     if m_vid:
                         return {
@@ -154,7 +150,6 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
                             "thumb": None
                         }
 
-                    # Если это фото
                     m_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
                     if m_img:
                         orig_url = re.sub(r'/\d+x/', '/originals/', m_img.group(1))
@@ -167,7 +162,6 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
     except Exception as e:
         LOGGER.warning(f"HTML scraper pinterest error: {e}")
 
-    # Дефолтный фоллбэк: считаем видео и передаем в yt-dlp
     return {"is_video": True, "title": "Pinterest Media", "direct_url": None, "thumb": None}
 
 async def extract_info(url: str):
@@ -196,11 +190,10 @@ def register(client, bot=None):
         ffmpeg_bin = get_ffmpeg_path()
 
         if status_msg:
-            try: await status_msg.edit("⏳ **Загрузка и обработка...**")
+            try: await status_msg.edit("⏳ <b>Загрузка и обработка...</b>", parse_mode="html")
             except Exception: pass
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            # 1. Прямая загрузка оригинального фото Pinterest
             if platform == "pinterest" and not session.get("is_video"):
                 direct_img = session.get("direct_url") or session.get("thumb")
                 if direct_img:
@@ -246,7 +239,7 @@ def register(client, bot=None):
                                 t_path = os.path.join(tmp_dir, "thumb.jpg")
                                 with open(t_path, "wb") as f:
                                     f.write(await r.read())
-                                await client.send_file(target_chat_id, file=t_path, reply_to=reply_to_id, caption="🖼 Превью в максимальном качестве")
+                                await client.send_file(target_chat_id, file=t_path, reply_to=reply_to_id, caption="🖼 <b>Превью в максимальном качестве</b>", parse_mode="html")
                                 if status_msg: await status_msg.delete()
                                 return
 
@@ -273,7 +266,6 @@ def register(client, bot=None):
                 })
 
             else:
-                # Универсальный безопасный формат (видео со звуком или без)
                 ydl_opts.update({
                     'format': UNIVERSAL_FORMAT,
                     'merge_output_format': 'mp4'
@@ -288,12 +280,12 @@ def register(client, bot=None):
                 info = await loop.run_in_executor(None, run_ydl)
             except Exception as e:
                 LOGGER.error(f"Download error: {e}")
-                if status_msg: await status_msg.edit(f"❌ **Ошибка загрузки:** `{e}`")
+                if status_msg: await status_msg.edit(f"❌ <b>Ошибка загрузки:</b> <code>{e}</code>", parse_mode="html")
                 return
 
             downloaded_files = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if not f.endswith(".part")]
             if not downloaded_files:
-                if status_msg: await status_msg.edit("❌ Файл не был сгенерирован.")
+                if status_msg: await status_msg.edit("❌ Файл не был сгенерирован.", parse_mode="html")
                 return
 
             main_file = max(downloaded_files, key=os.path.getsize)
@@ -313,7 +305,7 @@ def register(client, bot=None):
 
             caption = f"🎬 <b>{title}</b>" if not is_audio else f"🎵 <b>{uploader}</b> — <i>{title}</i>"
             if time_range:
-                caption += f"\n✂️ Нарезка: `[{time_range[0]} - {time_range[1]}]`"
+                caption += f"\n✂️ Нарезка: <code>[{time_range[0]} - {time_range[1]}]</code>"
 
             await client.send_file(
                 target_chat_id,
@@ -325,7 +317,37 @@ def register(client, bot=None):
             )
             if status_msg: await status_msg.delete()
 
-    # --- СЛУШАТЕЛЬ КОМАНД ---
+    # --- ИНЛАЙН-ОТВЕТЧИК БОТА-СИМБИОТА ---
+    if bot:
+        @bot.on(events.InlineQuery(pattern=r"^dl:([a-zA-Z0-9]+)"))
+        async def dl_inline_query_handler(event):
+            sess_id = event.pattern_match.group(1)
+            session = SESSIONS.get(sess_id)
+            if not session:
+                return
+
+            text = session["text"]
+            buttons = session["buttons"]
+
+            parsed_text, entities = await bot._parse_message_text(text, 'html')
+            send_msg = InputBotInlineMessageText(
+                message=parsed_text,
+                no_webpage=False,
+                invert_media=True,
+                entities=entities,
+                reply_markup=bot.build_reply_markup(buttons)
+            )
+
+            res_id = binascii.hexlify(os.urandom(8)).decode('ascii')
+            result = InputBotInlineResult(
+                id=res_id,
+                type='article',
+                title='Media Grabber',
+                send_message=send_msg
+            )
+            await event.answer([result], cache_time=1)
+
+    # --- СЛУШАТЕЛЬ КОМАНД СКАЧИВАНИЯ ---
     @client.on(events.NewMessage(pattern=r"^(?:sudo\s+|\.dl\s+)(https?://[^\s]+)(?:\s+(.*))?"))
     async def media_trigger_handler(event):
         if not await is_authorized(event): return
@@ -334,15 +356,15 @@ def register(client, bot=None):
         tail_args = (event.pattern_match.group(2) or "").strip()
         platform = detect_platform(raw_url)
 
-        # Быстрая нарезка таймкодом
+        # Быстрая нарезка
         time_m = re.match(r"^(\d+:\d+(?:\.\d+)?)-(\d+:\d+(?:\.\d+)?)$", tail_args)
         if time_m:
-            status = await event.reply("⚡ `Загрузка выбранного отрезка...`")
+            status = await event.reply("⚡ <code>Загрузка выбранного отрезка...</code>", parse_mode="html")
             sess = {"url": raw_url, "platform": platform, "thumb": None, "direct_url": None}
             await execute_download(event.chat_id, sess, "best", time_range=(time_m.group(1), time_m.group(2)), reply_to_id=event.id, status_msg=status)
             return
 
-        status = await event.reply("🔎 `Анализирую медиапоток...`")
+        status = await event.reply("🔎 <code>Анализирую медиапоток...</code>", parse_mode="html")
 
         spotify_meta = None
         p_info = None
@@ -358,22 +380,11 @@ def register(client, bot=None):
             else:
                 info = await extract_info(raw_url)
         except Exception as e:
-            return await status.edit(f"❌ Ошибка анализа ссылки: `{e}`")
+            return await status.edit(f"❌ Ошибка анализа ссылки: <code>{e}</code>", parse_mode="html")
 
         sess_id = uuid.uuid4().hex[:8]
-        SESSIONS[sess_id] = {
-            "url": raw_url,
-            "platform": platform,
-            "title": info.get("title", "Media"),
-            "thumb": info.get("thumbnail"),
-            "spotify_meta": spotify_meta,
-            "is_video": p_info.get("is_video", True) if p_info else True,
-            "direct_url": p_info.get("direct_url") if p_info else None,
-            "chat_id": event.chat_id,
-            "reply_id": event.id
-        }
 
-        # --- СБОРКА ИНЛАЙН МЕНЮ ---
+        # --- СБОРКА ТЕКСТА И КНОПОК ПОД ПЛАТФОРМУ ---
         buttons = []
 
         if platform == "youtube":
@@ -447,9 +458,10 @@ def register(client, bot=None):
         elif platform == "pinterest":
             is_vid = p_info.get("is_video", True) if p_info else True
             media_label = "Видео" if is_vid else "Фото"
+            clean_title = info.get('title', 'Медиа Pinterest')
             text = (
                 f"📌 <b>Pinterest ({media_label})</b>\n\n"
-                f"📌 {info.get('title', 'Медиа Pinterest')}\n\n"
+                f"📌 {clean_title}\n\n"
                 f"<b>Выберите действие ↓</b>"
             )
             btn_text = "🎬 Скачать видео (MP4)" if is_vid else "🖼 Скачать фото (Оригинал)"
@@ -473,7 +485,7 @@ def register(client, bot=None):
                 ]
             ]
 
-        else: # Instagram и прочие сайты
+        else: # Instagram и прочие
             text = (
                 f"🌐 <b>Media Stream</b>\n\n"
                 f"🎬 {info.get('title', 'Медиафайл')[:70]}\n\n"
@@ -487,16 +499,36 @@ def register(client, bot=None):
                 ]
             ]
 
-        await status.delete()
+        SESSIONS[sess_id] = {
+            "url": raw_url,
+            "platform": platform,
+            "title": info.get("title", "Media"),
+            "thumb": info.get("thumbnail"),
+            "spotify_meta": spotify_meta,
+            "is_video": p_info.get("is_video", True) if p_info else True,
+            "direct_url": p_info.get("direct_url") if p_info else None,
+            "chat_id": event.chat_id,
+            "reply_id": event.id,
+            "text": text,
+            "buttons": buttons
+        }
 
+        # --- ОТПРАВКА КНОПОК ЧЕРЕЗ ИНЛАЙН-ВЫЗОВ ПРОКСИМЫ ---
         if bot:
+            bot_me = await bot.get_me()
             try:
-                await bot.send_message(event.chat_id, text, buttons=buttons, reply_to=event.id, parse_mode="html")
-            except Exception as e:
-                LOGGER.error(f"Bot send error: {e}")
-                await event.reply(text)
+                results = await client.inline_query(bot_me.username, f"dl:{sess_id}")
+                if results:
+                    await results[0].click(event.chat_id, reply_to=event.id)
+                    await status.delete()
+                    return
+            except Exception as e_inline:
+                LOGGER.error(f"Inline query error: {e_inline}")
 
-    # --- ОБРАБОТЧИК КНОПОК СИМБИОТА ---
+        # Фоллбэк если инлайн-бот недоступен
+        await status.edit(text, parse_mode="html")
+
+    # --- ОБРАБОТЧИК КНОПОК ---
     if bot:
         @bot.on(events.CallbackQuery(pattern=r"^dl_([a-zA-Z0-9]+)_(.+)"))
         async def dl_callback_handler(event):
@@ -518,8 +550,8 @@ def register(client, bot=None):
                     parse_mode="html"
                 )
 
-            await event.answer("⚡ Начинаю загрузку...")
-            status = await event.edit(f"⬇️ **Загрузка и отправка...**\n`Действие: {action.upper()}`")
+            await event.answer("⚡ Запуск скачивания...")
+            status = await event.edit(f"⬇️ <b>Загрузка и отправка...</b>\n<code>Действие: {action.upper()}</code>", parse_mode="html")
             asyncio.create_task(execute_download(event.chat_id, session, action, reply_to_id=session["reply_id"], status_msg=status))
 
     # Слушатель обрезки
@@ -533,5 +565,5 @@ def register(client, bot=None):
         if not m:
             return await event.reply("❌ Формат не распознан. Пример: `00:15-00:45`.")
 
-        status = await event.reply(f"✂️ `Вырезаю фрагмент [{m.group(1)} - {m.group(2)}]...`")
+        status = await event.reply(f"✂️ <code>Вырезаю фрагмент [{m.group(1)} - {m.group(2)}]...</code>", parse_mode="html")
         asyncio.create_task(execute_download(event.chat_id, session, "best", time_range=(m.group(1), m.group(2)), reply_to_id=session["reply_id"], status_msg=status))
