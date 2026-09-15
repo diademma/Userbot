@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v3.5 (Spotify Multi-Search & Tag Sanitizer)
+# modules/downloader.py — Мультимедиа комбайн v3.6 (DocumentAttributeAudio Fix & Spotify Polish)
 import os
 import re
 import sys
@@ -29,7 +29,7 @@ COMMANDS = (
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
     "Музыкальный движок:\n"
-    "├ 🎵 Spotify (Парсинг + скачивание с Hitmo/Sefon/SoundCloud + вшивка HD обложки)\n"
+    "├ 🎵 Spotify (Парсинг альбомов/треков + умный поиск + ID3 теги)\n"
     "├ ☁️ SoundCloud (Оригинал 320 kbps)\n"
     "├ 📌 Pinterest (Видео и Фото без сжатия)\n"
     "├ 🔴 YouTube (144p-1080p, MP3, Нарезка)\n"
@@ -80,7 +80,12 @@ async def get_spotify_meta(url: str) -> dict | None:
                 if resp.status == 200:
                     data = await resp.json()
                     raw_title = data.get("title", "Track")
-                    author = data.get("author_name", "Artist")
+                    author = data.get("author_name", "")
+                    
+                    # Если автор пустой или равен стандартной заглушке
+                    if not author or author.lower() in ("artist", "unknown artist"):
+                        author = ""
+
                     thumb = data.get("thumbnail_url", "")
                     return {
                         "title": raw_title,
@@ -93,18 +98,19 @@ async def get_spotify_meta(url: str) -> dict | None:
 
 # --- МУЛЬТИ-ПОИСКОВИК МУЗЫКИ (HITMO, SEFON, SOUNDCLOUD) ---
 async def search_and_download_audio(query: str, target_file: Path) -> bool:
-    """Ищет трек на открытых музыкальных ресурсах в обход YouTube блоков"""
+    """Ищет трек на открытых музыкальных ресурсах"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
     }
-    encoded_query = urllib.parse.quote(query)
+    clean_q = re.sub(r"\s+", " ", query).strip()
+    encoded_query = urllib.parse.quote(clean_q)
 
     # 1. Источник: Hitmo (rus.hitmotop.com)
     try:
         hitmo_url = f"https://rus.hitmotop.com/search?q={encoded_query}"
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(hitmo_url, timeout=10) as resp:
+            async with session.get(hitmo_url, timeout=8) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     matches = re.findall(r'href=["\'](https?://[^"\']+/get/music/[^"\']+\.mp3)["\']', html)
@@ -119,16 +125,16 @@ async def search_and_download_audio(query: str, target_file: Path) -> bool:
                                 with open(target_file, "wb") as f:
                                     f.write(await dl_resp.read())
                                 if target_file.stat().st_size > 500_000:
-                                    LOGGER.info(f"✅ Трек успешно скачан с Hitmo: {query}")
+                                    LOGGER.info(f"✅ Трек успешно скачан с Hitmo: {clean_q}")
                                     return True
     except Exception as e:
-        LOGGER.warning(f"Hitmo search failed: {e}")
+        LOGGER.warning(f"Hitmo search: {e}")
 
     # 2. Источник: Sefon (sefon.pro)
     try:
         sefon_url = f"https://sefon.pro/search/?q={encoded_query}"
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(sefon_url, timeout=10) as resp:
+            async with session.get(sefon_url, timeout=8) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     mp3_links = re.findall(r'href=["\'](https?://[^"\']+\.mp3)["\']', html)
@@ -138,12 +144,12 @@ async def search_and_download_audio(query: str, target_file: Path) -> bool:
                                 with open(target_file, "wb") as f:
                                     f.write(await dl_resp.read())
                                 if target_file.stat().st_size > 500_000:
-                                    LOGGER.info(f"✅ Трек успешно скачан с Sefon: {query}")
+                                    LOGGER.info(f"✅ Трек успешно скачан с Sefon: {clean_q}")
                                     return True
     except Exception as e:
-        LOGGER.warning(f"Sefon search failed: {e}")
+        LOGGER.warning(f"Sefon search: {e}")
 
-    # 3. Источник: SoundCloud через yt-dlp (SoundCloud не блокирует дата-центры)
+    # 3. Источник: SoundCloud через yt-dlp (Работает безотказно)
     try:
         import yt_dlp
         sc_opts = {
@@ -161,21 +167,23 @@ async def search_and_download_audio(query: str, target_file: Path) -> bool:
         loop = asyncio.get_event_loop()
         def run_sc():
             with yt_dlp.YoutubeDL(sc_opts) as ydl:
-                return ydl.extract_info(f"scsearch1:{query}", download=True)
+                return ydl.extract_info(f"scsearch1:{clean_q}", download=True)
 
         await loop.run_in_executor(None, run_sc)
         if target_file.exists() and target_file.stat().st_size > 500_000:
-            LOGGER.info(f"✅ Трек скачан с SoundCloud: {query}")
+            LOGGER.info(f"✅ Трек скачан с SoundCloud: {clean_q}")
             return True
     except Exception as e:
-        LOGGER.warning(f"SoundCloud fallback search failed: {e}")
+        LOGGER.warning(f"SoundCloud fallback search: {e}")
 
     return False
 
 # --- ВШИВКА ТЕГОВ И ОБЛОЖКИ SPOTIFY ---
-async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_url: str = None):
-    """Стирает мусорные теги сайтов и вшивает официальный паспорт Spotify"""
+async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_url: str = None) -> int:
+    """Стирает мусорные теги сайтов, вшивает официальный паспорт Spotify и возвращает длительность"""
+    duration = 0
     cover_data = None
+
     if cover_url:
         try:
             async with aiohttp.ClientSession() as s:
@@ -186,28 +194,39 @@ async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_ur
             pass
 
     try:
+        from mutagen.mp3 import MP3
         from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, ID3NoHeaderError
+
+        # Считываем реальную длительность
+        try:
+            audio_info = MP3(str(mp3_path))
+            duration = int(audio_info.info.length or 0)
+        except Exception:
+            duration = 0
+
         try:
             audio = ID3(str(mp3_path))
-            audio.delete() # Полная зачистка мусора сайтов
+            audio.delete() # Полная зачистка мусора
         except ID3NoHeaderError:
             pass
 
         audio = ID3()
         audio.add(TIT2(encoding=3, text=title))
-        audio.add(TPE1(encoding=3, text=artist))
+        audio.add(TPE1(encoding=3, text=artist or "Spotify Track"))
         audio.add(TALB(encoding=3, text=title))
         if cover_data:
             audio.add(APIC(
                 encoding=3,
                 mime='image/jpeg',
-                type=3, # Обложка трека
+                type=3,
                 desc='Cover',
                 data=cover_data
             ))
         audio.save(str(mp3_path), v2_version=3)
     except Exception as e:
-        LOGGER.warning(f"Mutagen tag write error: {e}")
+        LOGGER.warning(f"Mutagen tag error: {e}")
+
+    return duration
 
 async def resolve_pinterest_pin(raw_url: str) -> dict:
     headers = {
@@ -277,12 +296,14 @@ def register(client, bot=None):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
 
-            # 1. ОБРАБОТКА SPOTIFY (Через умный мульти-поисковик)
+            # 1. ОБРАБОТКА SPOTIFY
             if platform == "spotify":
                 meta = session.get("spotify_meta") or {}
                 artist = meta.get("author", "").strip()
                 title = meta.get("title", "Track").strip()
-                search_query = f"{artist} - {title}".strip(" -")
+
+                # Формируем чистый запрос: если исполнитель пустой, ищем чисто по названию
+                search_query = f"{artist} - {title}".strip(" -") if artist else title
 
                 out_mp3 = tmp_path / "track.mp3"
                 ok = await search_and_download_audio(search_query, out_mp3)
@@ -293,16 +314,19 @@ def register(client, bot=None):
                         except Exception: pass
                     return
 
-                # Зачищаем левые метаданные и вшиваем оригинальные теги и обложку Spotify
-                await apply_clean_metadata(out_mp3, title, artist, meta.get("thumb"))
+                # Вшиваем теги и получаем реальную длительность
+                duration = await apply_clean_metadata(out_mp3, title, artist, meta.get("thumb"))
 
+                caption = f"🎵 <b>{artist}</b> — <i>{title}</i>" if artist else f"🎵 <b>{title}</b>"
+
+                # ИСПРАВЛЕНО: duration передан обязательным первым аргументом
                 await client.send_file(
                     target_chat_id,
                     file=str(out_mp3),
                     reply_to=reply_to_id,
-                    caption=f"🎵 <b>{artist}</b> — <i>{title}</i>",
+                    caption=caption,
                     parse_mode="html",
-                    attributes=[DocumentAttributeAudio(title=title, performer=artist)]
+                    attributes=[DocumentAttributeAudio(duration=duration, title=title, performer=artist or "Spotify")]
                 )
                 if status_event:
                     try: await status_event.edit("✅ <b>Готово!</b>", parse_mode="html")
@@ -331,7 +355,7 @@ def register(client, bot=None):
                                     except Exception: pass
                                 return
 
-            # 3. СТАНДАРТНАЯ ЗАГРУЗКА (YOUTUBE, TIKTOK, INSTAGRAM, SOUNDCLOUD)
+            # 3. YOUTUBE, TIKTOK, INSTAGRAM, SOUNDCLOUD
             import yt_dlp
             out_template = str(tmp_path / "%(title).50s.%(ext)s")
             ydl_opts = {
@@ -399,7 +423,8 @@ def register(client, bot=None):
 
             attrs = []
             if is_audio:
-                attrs = [DocumentAttributeAudio(title=title, performer=uploader, duration=duration)]
+                # ИСПРАВЛЕНО: duration передан обязательным первым аргументом
+                attrs = [DocumentAttributeAudio(duration=duration, title=title, performer=uploader)]
             elif main_file.endswith(".mp4"):
                 attrs = [DocumentAttributeVideo(duration=duration, w=1280, h=720, supports_streaming=True)]
 
@@ -407,7 +432,6 @@ def register(client, bot=None):
             if time_range:
                 caption += f"\n✂️ Нарезка: <code>[{time_range[0]} - {time_range[1]}]</code>"
 
-            # Точная отправка в чат сессии юзербота
             await client.send_file(
                 target_chat_id,
                 file=main_file,
@@ -476,7 +500,10 @@ def register(client, bot=None):
         try:
             if platform == "spotify":
                 spotify_meta = await get_spotify_meta(raw_url)
-                info = {"title": f"{spotify_meta['author']} — {spotify_meta['title']}", "thumbnail": spotify_meta.get("thumb")} if spotify_meta else await extract_info(raw_url)
+                author = spotify_meta.get("author", "") if spotify_meta else ""
+                title = spotify_meta.get("title", "") if spotify_meta else "Track"
+                display_title = f"{author} — {title}" if author else title
+                info = {"title": display_title, "thumbnail": spotify_meta.get("thumb") if spotify_meta else None}
             elif platform == "pinterest":
                 p_info = await resolve_pinterest_pin(raw_url)
                 info = {"title": p_info["title"], "thumbnail": p_info.get("thumb")}
@@ -489,9 +516,7 @@ def register(client, bot=None):
         thumb_url = info.get("thumbnail") or (p_info.get("thumb") if p_info else None) or (spotify_meta.get("thumb") if spotify_meta else None)
         title = info.get("title", "Медиафайл")
 
-        # Вшитое фото-превью вверху сообщения
         banner_tag = f'<a href="{thumb_url}">&#8205;</a>' if thumb_url else ''
-
         buttons = []
 
         if platform == "youtube":
@@ -520,12 +545,9 @@ def register(client, bot=None):
             ]
 
         elif platform in ("spotify", "soundcloud"):
-            artist = spotify_meta['author'] if (platform == "spotify" and spotify_meta) else (info.get("uploader") or "")
-            song = spotify_meta['title'] if (platform == "spotify" and spotify_meta) else title
-            caption_title = f"{artist} — {song}" if artist else song
-            text = f"{banner_tag}🎵 <b>{caption_title}</b>"
+            text = f"{banner_tag}🎵 <b>{title}</b>"
             buttons = [
-                [Button.inline("🎵 Скачать трек", data=f"dl_{sess_id}_mp3")]
+                [Button.inline("🎵 Скачать трек (MP3 320k)", data=f"dl_{sess_id}_mp3")]
             ]
 
         elif platform == "tiktok":
@@ -556,7 +578,7 @@ def register(client, bot=None):
             "buttons": buttons
         }
 
-        # Отправка инлайн-карточки через симбиота
+        # Отправка инлайн-карточки
         if bot:
             bot_me = await bot.get_me()
             try:
