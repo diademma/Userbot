@@ -1,4 +1,4 @@
-# modules/sniper.py — Антиспам-снайпер и модератор v5.4 (Iris Black Diamond 1h Hardlock)
+# modules/sniper.py — Антиспам-снайпер и модератор v5.6 (Iris Black + Celya 1h Lock)
 import re
 import asyncio
 import logging
@@ -33,12 +33,21 @@ COMMANDS = (
     "• sudo рп [сек] — Таймер сноса РП команд\n"
     "• sudo инфо [сек] — Таймер длинных меню\n"
     "• sudo лог — Последние события системы\n\n"
-    "💎 ЖЕСТКИЙ ПЕРЕХВАТ:\n"
-    "• Iris | Black Diamond (5443619563) — удаление ВСЕХ смс через 1 час"
+    "💎 ЖЕСТКИЙ ПЕРЕХВАТ (УДАЛЕНИЕ ЧЕРЕЗ 1 ЧАС):\n"
+    "• Iris | Black Diamond (5443619563)\n"
+    "• Celya / Celestiana (5160386506)"
 )
 
-# Точный Telegram ID бота Iris | Black Diamond (@iris_black_bot)
-IRIS_BLACK_ID = 5443619563
+# Пул ботов с гарантированным таймером жизни ровно 1 час (3600 секунд)
+ONE_HOUR_BOT_IDS = {
+    5443619563: "Iris | Black Diamond",
+    5160386506: "Celya"
+}
+
+ONE_HOUR_BOT_USERNAMES = {
+    "iris_black_bot": "Iris | Black Diamond",
+    "celya": "Celya"
+}
 
 KNOWN_BOT_USERNAMES = {
     "celya", "smartspeech_sber_bot", "vkmusicalrobot", 
@@ -230,6 +239,14 @@ async def delete_after(event, delay: int, label: str):
 
 # --- ТОЧКА ВХОДА API ---
 def register(client, bot=None):
+    # 🧹 ЛИКВИДАТОР ПРИЗРАКОВ: Удаление старых хэндлеров из памяти клиента
+    if hasattr(client, '_event_builders'):
+        client._event_builders = [
+            item for item in client._event_builders
+            if getattr(item[0], '__name__', '') not in ("sniper_chat_handler", "sniper_sudo_handler")
+        ]
+        logging.info("🧹 Старые хэндлеры снайпера выгружены из памяти клиента.")
+
     @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
     async def sniper_chat_handler(event):
         msg = event.message
@@ -239,11 +256,12 @@ def register(client, bot=None):
             return
 
         # =========================================================================
-        # 💎 ПРЯМОЙ ПЕРЕХВАТ: IRIS | BLACK DIAMOND (ID: 5443619563)
+        # 💎 АППАРАТНЫЙ ПЕРЕХВАТ 1-ЧАСОВЫХ БОТОВ (IRIS BLACK & CELYA) ПО ID
         # =========================================================================
-        if event.sender_id == IRIS_BLACK_ID:
-            logging.info("⏳ [Iris | Black Diamond] Поймано сообщение -> Удаление ровно через 1 час (3600с)")
-            asyncio.create_task(delete_after(event, 3600, "Iris Black Diamond (1 час)"))
+        if event.sender_id in ONE_HOUR_BOT_IDS:
+            b_label = ONE_HOUR_BOT_IDS[event.sender_id]
+            logging.info(f"⏳ [{b_label}] Поймано сообщение -> Таймер ровно на 1 час (3600с)")
+            asyncio.create_task(delete_after(event, 3600, f"{b_label} (1ч)"))
             return
 
         sender = None
@@ -253,12 +271,18 @@ def register(client, bot=None):
             try: sender = await client.get_entity(event.sender_id)
             except Exception: pass
 
-        # Страховочная проверка по ID объекта и юзернейму
+        # Страховочная проверка по объекту sender (ID и юзернейм)
         s_id = getattr(sender, 'id', None)
         s_user = (getattr(sender, 'username', '') or '').lower()
-        if s_id == IRIS_BLACK_ID or s_user == "iris_black_bot":
-            logging.info("⏳ [Iris | Black Diamond] Поймано сообщение (по sender) -> Удаление через 1 час (3600с)")
-            asyncio.create_task(delete_after(event, 3600, "Iris Black Diamond (1 час)"))
+        if s_id in ONE_HOUR_BOT_IDS:
+            b_label = ONE_HOUR_BOT_IDS[s_id]
+            logging.info(f"⏳ [{b_label}] Поймано сообщение -> Таймер ровно на 1 час (3600с)")
+            asyncio.create_task(delete_after(event, 3600, f"{b_label} (1ч)"))
+            return
+        if s_user in ONE_HOUR_BOT_USERNAMES:
+            b_label = ONE_HOUR_BOT_USERNAMES[s_user]
+            logging.info(f"⏳ [{b_label}] Поймано сообщение -> Таймер ровно на 1 час (3600с)")
+            asyncio.create_task(delete_after(event, 3600, f"{b_label} (1ч)"))
             return
 
         is_bot = getattr(sender, 'bot', False) if isinstance(sender, User) else False
