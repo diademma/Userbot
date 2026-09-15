@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v12.5 (Hybrid Turbo Uploader)
+# modules/downloader.py — Мультимедиа комбайн v13.0 (Smart Trim Flow & Timecode Fix)
 import os
 import re
 import sys
@@ -34,7 +34,9 @@ COMMANDS = (
     "• sudo {ссылка} — Интерактивная карточка с превью и кнопками\n"
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
-    "⚡ Встроен Hybrid Turbo-Uploader (Многопоточная отправка до 50 МБ/с)"
+    "✂️ Умная обрезка:\n"
+    "├ Выбор типа: нарезка видео или аудио\n"
+    "└ Отображение полного хронометража ролика"
 )
 
 # Глушим технический шум Telethon
@@ -62,19 +64,36 @@ PIPED_INSTANCES = [
     "https://pipedapi.leptons.xyz"
 ]
 
-# --- ГИБРИДНЫЙ ТУРБО-ЗАГРУЗЧИК В TELEGRAM ---
-async def fast_upload_file(client, file_path: Path, max_workers: int = 8):
-    """Гибридная загрузка: до 10 МБ — штатно за 1с, свыше 10 МБ — в 8 параллельных потоков по 512 КБ"""
-    file_size = file_path.stat().st_size
+def format_duration(seconds: int) -> str:
+    """Переводит секунды в аккуратный формат 00:00 или 00:00:00"""
+    if not seconds or seconds <= 0: return "00:00"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
-    # 1. Для небольших файлов штатный метод Telethon работает моментально
+def time_to_seconds(t_str: str) -> float:
+    """Конвертирует строку таймкода (01:30 или 90) в секунды (float)"""
+    parts = t_str.strip().split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+    except Exception:
+        return 0.0
+
+async def fast_upload_file(client, file_path: Path, max_workers: int = 8):
+    file_size = file_path.stat().st_size
     if file_size <= 10 * 1024 * 1024:
         return await client.upload_file(file_path)
 
-    # 2. Для больших файлов (>10 МБ) включаем турбо-параллелизацию
-    part_size = 512 * 1024  # 512 KB — максимальный чанк MTProto
+    part_size = 512 * 1024
     part_count = math.ceil(file_size / part_size)
-    file_id = random.getrandbits(63)  # Исправлено: чистый 63-битный ID
+    file_id = random.getrandbits(63)
 
     sem = asyncio.Semaphore(max_workers)
 
@@ -449,7 +468,7 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
             formats = info.get("formats", [])
             has_vid = any(f.get("vcodec") and f.get("vcodec") != "none" for f in formats) or info.get("vcodec") != "none"
             if has_vid or "video" in str(info.get("ext", "")):
-                return {"is_video": True, "title": info.get("title") or "Pinterest Video", "thumb": info.get("thumbnail"), "direct_url": None}
+                return {"is_video": True, "title": info.get("title") or "Pinterest Video", "thumb": info.get("thumbnail"), "direct_url": None, "duration": int(info.get("duration") or 0)}
     except Exception: pass
 
     try:
@@ -458,16 +477,16 @@ async def resolve_pinterest_pin(raw_url: str) -> dict:
                 if resp.status == 200:
                     html = await resp.text()
                     m_vpin = re.search(r'https://v\.pinimg\.com/videos/[^\s"\'<>]+\.mp4', html)
-                    if m_vpin: return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vpin.group(0), "thumb": None}
+                    if m_vpin: return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vpin.group(0), "thumb": None, "duration": 0}
                     m_vid = re.search(r'<meta\s+property=["\']og:video(?::secure_url)?["\']\s+content=["\']([^"\']+)["\']', html)
-                    if m_vid: return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vid.group(1), "thumb": None}
+                    if m_vid: return {"is_video": True, "title": "Pinterest Video", "direct_url": m_vid.group(1), "thumb": None, "duration": 0}
                     m_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
                     if m_img:
                         orig_url = re.sub(r'/\d+x/', '/originals/', m_img.group(1))
-                        return {"is_video": False, "title": "Pinterest Photo", "direct_url": orig_url, "thumb": orig_url}
+                        return {"is_video": False, "title": "Pinterest Photo", "direct_url": orig_url, "thumb": orig_url, "duration": 0}
     except Exception: pass
 
-    return {"is_video": True, "title": "Pinterest Media", "direct_url": None, "thumb": None}
+    return {"is_video": True, "title": "Pinterest Media", "direct_url": None, "thumb": None, "duration": 0}
 
 async def extract_info(url: str):
     import yt_dlp
@@ -492,7 +511,7 @@ async def extract_info(url: str):
 def register(client, bot=None):
     asyncio.create_task(ensure_latest_ytdlp())
 
-    async def execute_download(target_chat_id, session, action, time_range=None, reply_to_id=None, status_event=None):
+    async def execute_download(target_chat_id, session, action, time_range=None, time_str=None, reply_to_id=None, status_event=None):
         url = session["direct_url"] or session["url"]
         platform = session["platform"]
         ffmpeg_bin = get_ffmpeg_path()
@@ -572,13 +591,16 @@ def register(client, bot=None):
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file
 
-            if time_range:
-                ydl_opts['download_ranges'] = yt_dlp.utils.download_range_func(None, [(time_range[0], time_range[1])])
+            # ИСПРАВЛЕНИЕ: передаем числа (float), а не строки!
+            if time_range and len(time_range) == 2:
+                start_s = float(time_range[0])
+                end_s = float(time_range[1])
+                ydl_opts['download_ranges'] = yt_dlp.utils.download_range_func(None, [(start_s, end_s)])
                 ydl_opts['force_keyframes_at_cuts'] = True
 
             is_audio = False
 
-            if action == "mp3" or platform == "soundcloud":
+            if action in ("mp3", "trimaudio") or platform == "soundcloud":
                 is_audio = True
                 ydl_opts.update({
                     'format': AUDIO_FORMAT,
@@ -622,10 +644,9 @@ def register(client, bot=None):
                 attrs = [DocumentAttributeVideo(duration=duration, w=1280, h=720, supports_streaming=True)]
 
             caption = f"🎬 <b>{title}</b>" if not is_audio else f"🎵 <b>{uploader}</b> — <i>{title}</i>"
-            if time_range:
-                caption += f"\n✂️ Нарезка: <code>[{time_range[0]} - {time_range[1]}]</code>"
+            if time_str:
+                caption += f"\n✂️ Нарезка: <code>[{time_str[0]} - {time_str[1]}]</code>"
 
-            # ⚡ ГИБРИДНАЯ ОТПРАВКА
             await throttler.update(f"🚀 <b>Отправка в Telegram...</b>", force=True)
             fast_media = await fast_upload_file(client, main_file, max_workers=8)
 
@@ -661,11 +682,14 @@ def register(client, bot=None):
         tail_args = (event.pattern_match.group(2) or "").strip()
         platform = detect_platform(raw_url)
 
-        time_m = re.match(r"^(\d+:\d+(?:\.\d+)?)-(\d+:\d+(?:\.\d+)?)$", tail_args)
+        # Быстрая нарезка через команду
+        time_m = re.match(r"^(\d+(?::\d+)*(?:\.\d+)?)\s*-\s*(\d+(?::\d+)*(?:\.\d+)?)$", tail_args)
         if time_m:
+            s_sec = time_to_seconds(time_m.group(1))
+            e_sec = time_to_seconds(time_m.group(2))
             status = await event.reply("⚡ <code>Загрузка нарезки...</code>", parse_mode="html")
             sess = {"url": raw_url, "platform": platform, "thumb": None, "direct_url": None, "title": "Media"}
-            await execute_download(event.chat_id, sess, "best", time_range=(time_m.group(1), time_m.group(2)), reply_to_id=event.id, status_event=status)
+            await execute_download(event.chat_id, sess, "best", time_range=(s_sec, e_sec), time_str=(time_m.group(1), time_m.group(2)), reply_to_id=event.id, status_event=status)
             return
 
         status = await event.reply("🔎 <code>Анализирую медиапоток...</code>", parse_mode="html")
@@ -683,7 +707,7 @@ def register(client, bot=None):
                 info = {"title": display_title, "thumbnail": spotify_meta.get("thumb") if spotify_meta else None}
             elif platform == "pinterest":
                 p_info = await resolve_pinterest_pin(raw_url)
-                info = {"title": p_info["title"], "thumbnail": p_info.get("thumb")}
+                info = {"title": p_info["title"], "thumbnail": p_info.get("thumb"), "duration": p_info.get("duration", 0)}
             else:
                 info = await extract_info(raw_url)
         except Exception as e:
@@ -692,13 +716,13 @@ def register(client, bot=None):
         sess_id = uuid.uuid4().hex[:8]
         thumb_url = info.get("thumbnail") or (p_info.get("thumb") if p_info else None) or (spotify_meta.get("thumb") if spotify_meta else None)
         title = info.get("title", "Медиафайл")
+        duration = int(info.get("duration") or 0)
 
         banner_tag = f'<a href="{thumb_url}">&#8205;</a>' if thumb_url else ''
         buttons = []
 
         if platform == "youtube":
-            dur = info.get("duration") or 0
-            dur_str = f" • {dur//60}:{dur%60:02d}" if dur else ""
+            dur_str = f" • {format_duration(duration)}" if duration else ""
             text = f"{banner_tag}🎬 <b>{title}</b>{dur_str}"
             buttons = [
                 [
@@ -714,6 +738,8 @@ def register(client, bot=None):
             text = f"{banner_tag}📌 <b>{title}</b>"
             btn_label = "🎬 Скачать видео" if is_vid else "🖼 Скачать фото"
             buttons = [[Button.inline(btn_label, data=f"dl_{sess_id}_media")]]
+            if is_vid:
+                buttons.append([Button.inline("✂️ Обрезка", data=f"dl_{sess_id}_trim")])
         elif platform in ("spotify", "soundcloud"):
             text = f"{banner_tag}🎵 <b>{title}</b>"
             buttons = [[Button.inline("🎵 Скачать трек (MP3 320k)", data=f"dl_{sess_id}_mp3")]]
@@ -729,6 +755,7 @@ def register(client, bot=None):
             "platform": platform,
             "title": title,
             "thumb": thumb_url,
+            "duration": duration,
             "spotify_meta": spotify_meta,
             "is_video": p_info.get("is_video", True) if p_info else True,
             "direct_url": p_info.get("direct_url") if p_info else None,
@@ -761,27 +788,90 @@ def register(client, bot=None):
             session = SESSIONS.get(sess_id)
             if not session: return await event.answer("⚠️ Ссылка устарела.", alert=True)
 
+            # Нажатие на кнопку «✂️ Обрезка»: Показываем подменю выбора типа
             if action == "trim":
-                WAITING_TRIM[session["chat_id"]] = session
+                dur = session.get("duration", 0)
+                dur_str = format_duration(dur)
+                range_str = f"00:00 — {dur_str}" if dur > 0 else "00:00 — конец"
+
+                text = (
+                    f"✂️ <b>Режим обрезки</b>\n\n"
+                    f"⏱ <b>Длительность:</b> <code>{range_str}</code>\n\n"
+                    f"Что именно будем нарезать?"
+                )
+                buttons = [
+                    [
+                        Button.inline("🎬 Обрезать видео", data=f"dl_{sess_id}_trimvid"),
+                        Button.inline("🔊 Обрезать аудио", data=f"dl_{sess_id}_trimaudio")
+                    ],
+                    [Button.inline("« Назад к форматам", data=f"dl_{sess_id}_back")]
+                ]
                 await event.answer()
-                return await event.edit("✂️ <b>Отправьте отрезок в чат:</b>\nНапример: <code>00:10-00:45</code>", parse_mode="html")
+                return await event.edit(text, buttons=buttons, parse_mode="html")
+
+            # Возврат назад к форматам
+            elif action == "back":
+                await event.answer()
+                return await event.edit(session["text"], buttons=session["buttons"], parse_mode="html")
+
+            # Выбор: резать видео или аудио
+            elif action in ("trimvid", "trimaudio"):
+                target_mode = "video" if action == "trimvid" else "audio"
+                WAITING_TRIM[session["chat_id"]] = {
+                    "session": session,
+                    "target_mode": target_mode
+                }
+                mode_name = "видео 🎬" if target_mode == "video" else "аудиодорожки 🔊"
+                dur = session.get("duration", 0)
+                dur_str = format_duration(dur)
+                range_str = f"00:00 — {dur_str}" if dur > 0 else "00:00 — конец"
+
+                await event.answer()
+                return await event.edit(
+                    f"✂️ <b>Нарезка {mode_name}</b>\n\n"
+                    f"⏱ Полный хронометраж: <code>{range_str}</code>\n\n"
+                    f"Отправьте таймкод отрезка в чат:\n"
+                    f"Например: <code>00:10-00:45</code> или <code>01:00-02:15</code>",
+                    parse_mode="html"
+                )
 
             await event.answer("⚡ Загрузка...")
             asyncio.create_task(
                 execute_download(session["chat_id"], session, action, reply_to_id=session["reply_id"], status_event=event)
             )
 
-    # Слушатель нарезки
+    # Слушатель таймкодов обрезки
     @client.on(events.NewMessage(func=lambda e: e.chat_id in WAITING_TRIM))
     async def trim_catcher_handler(event):
-        session = WAITING_TRIM.pop(event.chat_id, None)
-        if not session: return
+        trim_data = WAITING_TRIM.pop(event.chat_id, None)
+        if not trim_data: return
 
+        session = trim_data["session"]
+        target_mode = trim_data["target_mode"]
         text = event.raw_text.strip()
-        m = re.match(r"^(\d+:\d+(?:\.\d+)?)-(\d+:\d+(?:\.\d+)?)$", text)
-        if not m: return await event.reply("❌ Формат не распознан. Пример: `00:15-00:45`.")
 
-        status = await event.reply(f"✂️ <code>Вырезаю [{m.group(1)} - {m.group(2)}]...</code>", parse_mode="html")
+        m = re.match(r"^(\d+(?::\d+)*(?:\.\d+)?)\s*-\s*(\d+(?::\d+)*(?:\.\d+)?)$", text)
+        if not m:
+            return await event.reply("❌ Формат не распознан. Пример: `00:15-00:45`.")
+
+        s_sec = time_to_seconds(m.group(1))
+        e_sec = time_to_seconds(m.group(2))
+
+        if s_sec >= e_sec:
+            return await event.reply("❌ Начало должно быть меньше конца! Пример: `00:10-00:45`.")
+
+        action = "trimaudio" if target_mode == "audio" else "media"
+        mode_label = "аудио" if target_mode == "audio" else "видео"
+        status = await event.reply(f"✂️ <code>Вырезаю {mode_label} [{m.group(1)} - {m.group(2)}]...</code>", parse_mode="html")
+
         asyncio.create_task(
-            execute_download(session["chat_id"], session, "best", time_range=(m.group(1), m.group(2)), reply_to_id=session["reply_id"], status_event=status)
+            execute_download(
+                session["chat_id"],
+                session,
+                action,
+                time_range=(s_sec, e_sec),
+                time_str=(m.group(1), m.group(2)),
+                reply_to_id=session["reply_id"],
+                status_event=status
+            )
         )
