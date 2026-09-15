@@ -14,15 +14,11 @@ from core.config import USERBOT_NAME, OWNER_ID
 from core.db import is_authorized, mem_logs
 from core.loader import get_loaded_modules, get_pending_modules, load_single_module, MODULES_DIR
 
-# Дефолтный баннер системы
 HEADER_BANNER_URL = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
 START_TIME = time.time()
-
-# Временное хранилище избранных модулей
 FAVORITE_MODULES = set()
 
 def get_uptime_str() -> str:
-    """Форматирование аптайма в виде 00 : 06 : 23"""
     total_sec = int(time.time() - START_TIME)
     hours = total_sec // 3600
     minutes = (total_sec % 3600) // 60
@@ -30,7 +26,6 @@ def get_uptime_str() -> str:
     return f"{hours:02d} : {minutes:02d} : {seconds:02d}"
 
 def get_ram_usage() -> str:
-    """Подсчет памяти в процентах"""
     try:
         import resource
         proc_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -48,7 +43,6 @@ def get_ram_usage() -> str:
         return "4.8% (воркер: 28.5 МБ)"
 
 def get_cpu_load() -> str:
-    """Нагрузка на процессор в процентах"""
     try:
         load1, _, _ = os.getloadavg()
         cores = os.cpu_count() or 2
@@ -58,7 +52,6 @@ def get_cpu_load() -> str:
         return "1.2%"
 
 def get_all_warehouse_modules():
-    """Получает список всех файлов модулей со склада"""
     if not os.path.exists(MODULES_DIR):
         return []
     files = glob.glob(os.path.join(MODULES_DIR, "*.py"))
@@ -71,7 +64,6 @@ def build_home_keyboard():
     ]
 
 def build_modules_keyboard(tab="act", page=0):
-    """Сборка меню модулей: табы (Избранное | Активные | Склад) + пагинация по 5 штук"""
     loaded = get_loaded_modules()
     loaded_keys = list(loaded.keys())
     all_mods = get_all_warehouse_modules()
@@ -87,15 +79,12 @@ def build_modules_keyboard(tab="act", page=0):
     current_items = source_list[page * per_page : (page + 1) * per_page]
 
     buttons = []
-    
-    # 1. Надежные символы табов: ★ (Избранное) | ⊞ (Активные) | ⧉ (Склад)
     buttons.append([
         Button.inline("★" if tab=="fav" else "☆", data="mod_tab_fav_0"),
         Button.inline("⊞" if tab=="act" else "⊟", data="mod_tab_act_0"),
         Button.inline("⧉" if tab=="wh" else "▫", data="mod_tab_wh_0")
     ])
 
-    # 2. Кнопки модулей (названия берутся динамически из самого модуля через API)
     for mod_name in current_items:
         if mod_name in loaded:
             mod_obj = loaded[mod_name]
@@ -108,7 +97,6 @@ def build_modules_keyboard(tab="act", page=0):
             
         buttons.append([Button.inline(title, data=f"open_mod_{mod_name}")])
 
-    # 3. Стрелочки пагинации
     nav_row = []
     if page > 0:
         nav_row.append(Button.inline("«", data=f"mod_tab_{tab}_{page-1}"))
@@ -119,12 +107,10 @@ def build_modules_keyboard(tab="act", page=0):
     if nav_row:
         buttons.append(nav_row)
 
-    # 4. Назад
     buttons.append([Button.inline("« Назад", data="menu_main")])
     return buttons
 
 async def safe_edit(event, bot, text, buttons):
-    """Жесткое редактирование через Raw API для сохранения фото наверху"""
     parsed_text, entities = await bot._parse_message_text(text, 'html')
     try:
         await bot(EditInlineBotMessageRequest(
@@ -152,6 +138,11 @@ def init_inline(user, bot):
     async def inline_query_handler(event):
         user_me = await user.get_me()
         if event.sender_id != OWNER_ID and event.sender_id != user_me.id:
+            return
+
+        # Пропускаем запросы других модулей (например dl:...)
+        query_text = (event.text or "").strip()
+        if query_text and query_text != "panel":
             return
 
         start = time.perf_counter()
@@ -195,7 +186,6 @@ def init_inline(user, bot):
         if data == "ignore":
             return await event.answer()
 
-        # ГЛАВНЫЙ ЭКРАН
         if data == "menu_main":
             start = time.perf_counter()
             await bot.get_me()
@@ -208,7 +198,6 @@ def init_inline(user, bot):
             )
             await safe_edit(event, bot, text, build_home_keyboard())
 
-        # РАЗДЕЛ: МОДУЛИ (ТОЛЬКО ЧИСЛО И ЦИТАТА, БЕЗ ЛИШНЕГО ТЕКСТА)
         elif data.startswith("mod_tab_"):
             parts = data.split("_")
             tab = parts[2]
@@ -218,12 +207,9 @@ def init_inline(user, bot):
             all_mods = get_all_warehouse_modules()
             favs = list(FAVORITE_MODULES)
 
-            if tab == "fav":
-                lst = favs
-            elif tab == "wh":
-                lst = all_mods
-            else:
-                lst = list(loaded.keys())
+            if tab == "fav": lst = favs
+            elif tab == "wh": lst = all_mods
+            else: lst = list(loaded.keys())
 
             list_str = "\n".join([f"• {m}" for m in lst]) if lst else "• Пусто"
 
@@ -234,7 +220,6 @@ def init_inline(user, bot):
             )
             await safe_edit(event, bot, text, build_modules_keyboard(tab, page))
 
-        # ОТКРЫТИЕ МОДУЛЯ: ИНФОРМАЦИЯ И ФОТО БЕРУТСЯ ИЗ САМОГО МОДУЛЯ (API)
         elif data.startswith("open_mod_"):
             mod_name = data.replace("open_mod_", "")
             loaded = get_loaded_modules()
@@ -268,7 +253,6 @@ def init_inline(user, bot):
             ]
             await safe_edit(event, bot, text, btns)
 
-        # ПЕРЕКЛЮЧЕНИЕ АКТИВНОСТИ МОДУЛЯ
         elif data.startswith("toggle_act_"):
             mod_name = data.replace("toggle_act_", "")
             from core.loader import LOADED_MODULES
@@ -288,7 +272,6 @@ def init_inline(user, bot):
                 else:
                     await event.answer(f"Файл {mod_name}.py не найден", alert=True)
 
-            # Перерисовываем карточку модуля
             loaded = get_loaded_modules()
             is_active = mod_name in loaded
             is_fav = mod_name in FAVORITE_MODULES
@@ -319,7 +302,6 @@ def init_inline(user, bot):
             ]
             await safe_edit(event, bot, text, btns)
 
-        # ИЗБРАННОЕ
         elif data.startswith("toggle_fav_"):
             mod_name = data.replace("toggle_fav_", "")
             if mod_name in FAVORITE_MODULES:
@@ -359,7 +341,6 @@ def init_inline(user, bot):
             ]
             await safe_edit(event, bot, text, btns)
 
-        # РАЗДЕЛ: СИСТЕМА (С ВОЗВРАЩЕННЫМИ ЛОГАМИ)
         elif data == "menu_system":
             text = (
                 f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Система</b>\n\n'
@@ -373,7 +354,6 @@ def init_inline(user, bot):
             ]
             await safe_edit(event, bot, text, btns)
 
-        # РАЗДЕЛ: ЛОГИ
         elif data == "menu_logs":
             logs = mem_logs.get_logs(12)
             log_text = "\n".join(logs) if logs else "Журнал пуст."
@@ -383,7 +363,6 @@ def init_inline(user, bot):
             ]
             await safe_edit(event, bot, text, btns)
 
-        # РАЗДЕЛ: НАСТРОЙКИ
         elif data == "menu_settings":
             text = (
                 f'{banner}<b>𝗣𝗿𝗼𝘅𝗶𝗺𝗮 UB — Настройки</b>\n\n'
