@@ -1,7 +1,14 @@
-# modules/quote_stickers.py — Генератор 3D-видеостикеров v3.5 (No-Pipes / Pure Stability)
+# modules/quote_stickers.py — Высокоточный генератор 3D-видеостикеров v2.7 (Original Restored)
+import sys
+
+# Сброс залипшего флага рекурсии OpenCV в памяти Python
+if hasattr(sys, '_cv2_loader_recursion'):
+    try: delattr(sys, '_cv2_loader_recursion')
+    except Exception: pass
+
 import os
 import re
-import shutil
+import time
 import random
 import sqlite3
 import logging
@@ -10,10 +17,13 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime
 import asyncio
+import subprocess
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+# Поддержка современных Apple / iOS эмодзи
 try:
     from pilmoji import Pilmoji
     from pilmoji.source import AppleEmojiSource
@@ -32,6 +42,7 @@ from telethon.tl.types import (
 from core.config import OWNER_ID, DB_NAME
 from core.db import is_authorized
 
+# --- ОБЯЗАТЕЛЬНЫЕ МЕТАДАННЫЕ API ДЛЯ ЯДРА ---
 TITLE = "❝ Quote Stickers"
 BANNER = "https://raw.githubusercontent.com/diademma/Userbot/main/assets/LLEHTABPA.jpg"
 COMMANDS = (
@@ -40,8 +51,8 @@ COMMANDS = (
     "• sudo цитата [1|2] [текст] — Выбор шаблона:\n"
     "  └ 1: Девочка в желтой шапке с блокнотом\n"
     "  └ 2: Девочка разворачивает рисунок\n\n"
-    "⚙️ ПАРАМЕТРЫ:\n"
-    "• Лимит длины: до 45 символов"
+    "⚙️ ПАРАМЕТРЫ И ОГРАНИЧЕНИЯ:\n"
+    "• Лимит длины: до 45 символов (для крупного шрифта)\n"
 )
 
 LOGGER = logging.getLogger("QuoteStickers")
@@ -50,6 +61,7 @@ TARGET_CHAT_ID = -1002281822286
 DAILY_LIMIT = 3
 MAX_CHAR_LIMIT = 45
 
+# Источники красивых жирных маркеров
 FONT_URLS = [
     "https://raw.githubusercontent.com/google/fonts/main/ofl/neucha/Neucha.ttf",
     "https://raw.githubusercontent.com/anton-liubushkin/cyrillic-google-fonts/master/fonts/MarckScript-Regular.ttf",
@@ -63,7 +75,7 @@ TEMPLATES = {
         "end_time": 1.300,
         "is_static": True,
         "pose_1": {
-            "corners": [(82, 210), (237, 170), (256, 275), (114, 315)],
+            "corners": np.float32([[82, 210], [237, 170], [256, 275], [114, 315]]),
             "fingers": []
         }
     },
@@ -74,23 +86,16 @@ TEMPLATES = {
         "is_static": False,
         "pose_1": {
             "time_sec": 0.534,
-            "corners": [(170, 260), (275, 223), (305, 349), (220, 405)],
-            "fingers": [(302, 301), (288, 299), (277, 312), (282, 323), (288, 336), (300, 347), (310, 353)]
+            "corners": np.float32([[170, 260], [275, 223], [305, 349], [220, 405]]),
+            "fingers": np.array([[302, 301], [288, 299], [277, 312], [282, 323], [288, 336], [300, 347], [310, 353]], dtype=np.int32)
         },
         "pose_2": {
             "time_sec": 0.634,
-            "corners": [(73, 295), (256, 228), (312, 355), (132, 427)],
-            "fingers": [(310, 350), (295, 342), (281, 333), (282, 316), (295, 318), (309, 311)]
+            "corners": np.float32([[73, 295], [256, 228], [312, 355], [132, 427]]),
+            "fingers": np.array([[310, 350], [295, 342], [281, 333], [282, 316], [295, 318], [309, 311]], dtype=np.int32)
         }
     }
 }
-
-def get_ffmpeg_path():
-    p = shutil.which("ffmpeg")
-    if p: return p
-    home_p = os.path.expanduser("~/.local/bin/ffmpeg")
-    if os.path.isfile(home_p): return home_p
-    return "ffmpeg"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -148,29 +153,36 @@ def get_font_path():
                 
     return str(font_path)
 
-def find_perspective_coeffs(source_coords, target_coords):
-    matrix = []
-    for (x, y), (X, Y) in zip(source_coords, target_coords):
-        matrix.extend([
-            [X, Y, 1, 0, 0, 0, -x * X, -x * Y],
-            [0, 0, 0, X, Y, 1, -y * X, -y * Y]
-        ])
-    A = np.matrix(matrix, dtype=float)
-    B = np.array(source_coords).reshape(8)
-    res = np.dot(np.linalg.inv(A.T * A) * A.T, B)
-    return np.array(res).reshape(8)
+# РОДНОЙ УМНЫЙ FLOODFILL ОТ 4 УГЛОВ (Лицо девочки не трогается!)
+def make_background_transparent(frame_bgra):
+    h, w = frame_bgra.shape[:2]
+    rgb = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
+    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+    diff = (6, 6, 6)
 
-def render_text_plate(text: str, card_w=400, card_h=300) -> Image.Image:
+    for seed in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+        if np.all(rgb[seed[1], seed[0]] >= 242):
+            cv2.floodFill(
+                rgb, flood_mask, seed, (0, 255, 0),
+                diff, diff, flags=4 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY
+            )
+
+    outer_bg = (flood_mask[1:-1, 1:-1] == 255)
+    frame_bgra[outer_bg, 3] = 0
+    return frame_bgra
+
+def render_text_plate(text: str, card_w=400, card_h=300):
     img = Image.new("RGBA", (card_w, card_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
     font_file = get_font_path()
 
     words = text.split()
-    pad_x, pad_y = 22, 18
+    pad_x = 22
+    pad_y = 18
     avail_w = card_w - (pad_x * 2)
     avail_h = card_h - (pad_y * 2)
 
-    font_size = 150
+    font_size = 160
     best_lines = []
     best_font = None
 
@@ -190,20 +202,26 @@ def render_text_plate(text: str, card_w=400, card_h=300) -> Image.Image:
         for w in words:
             test = f"{curr} {w}".strip()
             bbox = draw.textbbox((0, 0), test, font=font)
-            if (bbox[2] - bbox[0]) <= avail_w:
+            w_len = bbox[2] - bbox[0]
+            
+            if w_len <= avail_w:
                 curr = test
             else:
-                if curr: lines.append(curr)
-                if (draw.textbbox((0, 0), w, font=font)[2] - draw.textbbox((0, 0), w, font=font)[0]) > avail_w:
+                if curr:
+                    lines.append(curr)
+                w_single_len = draw.textbbox((0, 0), w, font=font)[2] - draw.textbbox((0, 0), w, font=font)[0]
+                if w_single_len > avail_w:
                     fits = False
                     break
                 curr = w
 
-        if curr: lines.append(curr)
+        if curr:
+            lines.append(curr)
 
         if fits and lines:
             line_h = font_size * 1.05
-            if (len(lines) * line_h) <= avail_h:
+            total_h = len(lines) * line_h
+            if total_h <= avail_h:
                 best_lines = lines
                 best_font = font
                 break
@@ -218,122 +236,129 @@ def render_text_plate(text: str, card_w=400, card_h=300) -> Image.Image:
     line_h = font_size * 1.05
     total_h = len(best_lines) * line_h
     start_y = pad_y + (avail_h - total_h) / 2
+
     text_color = (195, 25, 45, 255)
 
     if HAS_PILMOJI:
         with Pilmoji(img, source=AppleEmojiSource) as pilmoji:
             for i, line in enumerate(best_lines):
                 bbox = draw.textbbox((0, 0), line, font=best_font)
-                x = pad_x + (avail_w - (bbox[2] - bbox[0])) / 2
+                line_w = bbox[2] - bbox[0]
+                x = pad_x + (avail_w - line_w) / 2
                 y = start_y + (i * line_h)
-                pilmoji.text((x, y), line, fill=text_color, font=best_font)
+                pilmoji.text((x, y), line, fill=text_color, font=best_font, stroke_width=1, stroke_fill=text_color)
     else:
         for i, line in enumerate(best_lines):
             bbox = draw.textbbox((0, 0), line, font=best_font)
-            x = pad_x + (avail_w - (bbox[2] - bbox[0])) / 2
+            line_w = bbox[2] - bbox[0]
+            x = pad_x + (avail_w - line_w) / 2
             y = start_y + (i * line_h)
-            draw.text((x, y), line, fill=text_color, font=best_font)
+            draw.text((x, y), line, fill=text_color, font=best_font, stroke_width=1, stroke_fill=text_color)
 
-    return img
+    return cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGRA)
 
+# ПЛАВНЫЙ И ТОЧНЫЙ ГЕНЕРАТОР НА CV2
 async def generate_quote_sticker(text: str, template_num: int, output_file: str) -> bool:
     cfg = TEMPLATES.get(template_num, TEMPLATES[2])
-    template_path = cfg["file"]
-    if not os.path.exists(template_path):
-        LOGGER.error(f"Шаблон {template_path} не найден!")
+    if not os.path.exists(cfg["file"]):
+        LOGGER.error(f"Шаблон {cfg['file']} не найден!")
         return False
 
-    ffmpeg_bin = get_ffmpeg_path()
+    cap = cv2.VideoCapture(cfg["file"])
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    
     card_w, card_h = 400, 300
-    plate_img = render_text_plate(text, card_w=card_w, card_h=card_h)
-    src_corners = [(0, 0), (card_w, 0), (card_w, card_h), (0, card_h)]
+    text_plate = render_text_plate(text, card_w=card_w, card_h=card_h)
+    src_pts = np.float32([[0, 0], [card_w, 0], [card_w, card_h], [0, card_h]])
 
-    with tempfile.TemporaryDirectory() as work_dir:
-        work_path = Path(work_dir)
-        frames_in_dir = work_path / "in"
-        frames_out_dir = work_path / "out"
-        frames_in_dir.mkdir()
-        frames_out_dir.mkdir()
+    ffmpeg_cmd = [
+        'ffmpeg', '-hide_banner', '-y',
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-s', '512x512',
+        '-pix_fmt', 'bgra',
+        '-r', str(fps),
+        '-i', '-',
+        '-c:v', 'libvpx-vp9',
+        '-crf', '30',
+        '-b:v', '250k',
+        '-pix_fmt', 'yuva420p',
+        '-an',
+        '-fs', '250K',
+        output_file
+    ]
 
-        # 1. Распаковываем шаблон в кадры (без зависаний и дедлоков)
-        extract_cmd = [
-            ffmpeg_bin, "-hide_banner", "-y",
-            "-i", template_path,
-            "-vf", "scale=512:512",
-            str(frames_in_dir / "f_%04d.png")
-        ]
-        proc = await asyncio.create_subprocess_exec(*extract_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await proc.wait()
+    proc = await asyncio.create_subprocess_exec(
+        *ffmpeg_cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL
+    )
 
-        frame_files = sorted(list(frames_in_dir.glob("f_*.png")))
-        if not frame_files:
-            LOGGER.error("FFmpeg не смог извлечь кадры шаблона.")
-            return False
+    start_t = cfg["start_time"]
+    end_t = cfg["end_time"]
+    is_static = cfg.get("is_static", False)
 
-        fps = 25.0
-        start_t = cfg["start_time"]
-        end_t = cfg["end_time"]
-        is_static = cfg.get("is_static", False)
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        # 2. Обработка кадров в Pillow
-        for idx, fpath in enumerate(frame_files):
-            cur_t = idx / fps
-            frame_img = Image.open(fpath).convert("RGBA")
+        cur_t = frame_idx / fps
 
-            # Хромакей белого фона
-            arr = np.array(frame_img)
-            white_mask = (arr[:, :, 0] > 240) & (arr[:, :, 1] > 240) & (arr[:, :, 2] > 240)
-            arr[white_mask, 3] = 0
-            frame_img = Image.fromarray(arr)
+        if frame.shape[:2] != (512, 512):
+            frame = cv2.resize(frame, (512, 512))
+        if frame.shape[2] == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
 
-            # Наложение 3D-таблички
-            if start_t <= cur_t <= end_t:
-                if is_static:
-                    dst_corners = cfg["pose_1"]["corners"]
-                    fingers = cfg["pose_1"]["fingers"]
+        frame = make_background_transparent(frame)
+
+        if start_t <= cur_t <= end_t:
+            if is_static:
+                dst_pts = cfg["pose_1"]["corners"]
+                fingers = cfg["pose_1"]["fingers"]
+            else:
+                p1 = cfg["pose_1"]
+                p2 = cfg["pose_2"]
+                if cur_t <= p1["time_sec"]:
+                    dst_pts = p1["corners"]
+                    fingers = p1["fingers"]
+                elif cur_t >= p2["time_sec"]:
+                    dst_pts = p2["corners"]
+                    fingers = p2["fingers"]
                 else:
-                    p1, p2 = cfg["pose_1"], cfg["pose_2"]
-                    if cur_t <= p1["time_sec"]:
-                        dst_corners, fingers = p1["corners"], p1["fingers"]
-                    elif cur_t >= p2["time_sec"]:
-                        dst_corners, fingers = p2["corners"], p2["fingers"]
-                    else:
-                        factor = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
-                        dst_corners = [
-                            (int(p1["corners"][k][0] + (p2["corners"][k][0] - p1["corners"][k][0]) * factor),
-                             int(p1["corners"][k][1] + (p2["corners"][k][1] - p1["corners"][k][1]) * factor))
-                            for k in range(4)
-                        ]
-                        fingers = p2["fingers"] if factor > 0.5 else p1["fingers"]
+                    f = (cur_t - p1["time_sec"]) / (p2["time_sec"] - p1["time_sec"])
+                    dst_pts = (p1["corners"] + (p2["corners"] - p1["corners"]) * f).astype(np.float32)
+                    fingers = p2["fingers"] if f > 0.5 else p1["fingers"]
 
-                coeffs = find_perspective_coeffs(src_corners, dst_corners)
-                transformed_plate = plate_img.transform((512, 512), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
+            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            warped = cv2.warpPerspective(text_plate, M, (512, 512), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
-                if len(fingers) >= 3:
-                    f_mask = Image.new("L", (512, 512), 255)
-                    draw_f = ImageDraw.Draw(f_mask)
-                    draw_f.polygon(fingers, fill=0)
-                    transformed_plate.putalpha(Image.composite(transformed_plate.getchannel("A"), f_mask, f_mask))
+            if len(fingers) >= 3:
+                f_mask = np.zeros((512, 512), dtype=np.uint8)
+                cv2.fillPoly(f_mask, [fingers], 255)
+                warped[f_mask == 255] = [0, 0, 0, 0]
 
-                frame_img.alpha_composite(transformed_plate)
+            alpha = warped[:, :, 3] / 255.0
+            for c in range(3):
+                frame[:, :, c] = (warped[:, :, c] * alpha + frame[:, :, c] * (1.0 - alpha)).astype(np.uint8)
+            frame[:, :, 3] = np.maximum(frame[:, :, 3], warped[:, :, 3])
 
-            frame_img.save(frames_out_dir / f"out_{idx:04d}.png")
+        try:
+            proc.stdin.write(frame.tobytes())
+            await proc.stdin.drain()
+        except Exception:
+            break
 
-        # 3. Сборка WebM стикера
-        compile_cmd = [
-            ffmpeg_bin, "-hide_banner", "-y",
-            "-framerate", str(fps),
-            "-i", str(frames_out_dir / "out_%04d.png"),
-            "-c:v", "libvpx-vp9",
-            "-crf", "30",
-            "-b:v", "250k",
-            "-pix_fmt", "yuva420p",
-            "-an",
-            "-fs", "250K",
-            output_file
-        ]
-        proc = await asyncio.create_subprocess_exec(*compile_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        frame_idx += 1
+
+    cap.release()
+    try:
+        proc.stdin.close()
         await proc.wait()
+    except Exception:
+        pass
 
     return os.path.exists(output_file) and os.path.getsize(output_file) > 1000
 
@@ -344,8 +369,11 @@ def register(client, bot=None):
     async def check_access(event, consume_quota=False) -> tuple[bool, str]:
         sid = event.sender_id
         cid = event.chat_id
-        if not sid: return False, "Неизвестный отправитель."
-        if sid == OWNER_ID or await is_authorized(event): return True, "unlimited"
+        if not sid:
+            return False, "Неизвестный отправитель."
+
+        if sid == OWNER_ID or await is_authorized(event):
+            return True, "unlimited"
 
         if cid == TARGET_CHAT_ID:
             if consume_quota:
@@ -367,7 +395,8 @@ def register(client, bot=None):
 
         raw = event.raw_text.strip()
         match = CMD_REGEX.match(raw)
-        if not match: return
+        if not match:
+            return
 
         tmpl_group = match.group(1)
         text_arg = (match.group(2) or "").strip()
@@ -394,9 +423,10 @@ def register(client, bot=None):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             out_file = os.path.join(tmp_dir, f"quote_{event.id}.webm")
+            
             ok = await generate_quote_sticker(text_arg, chosen_template, out_file)
             if not ok:
-                return await status.edit("❌ Ошибка сборки стикера. Проверь файлы `01.mp4` и `02.mp4` в папке `templates/`.")
+                return await status.edit("❌ Ошибка сборки видеостикера. Проверь наличие `01.mp4` и `02.mp4` в `templates/`.")
 
             custom_attributes = [
                 DocumentAttributeSticker(alt="✨", stickerset=InputStickerSetEmpty()),
@@ -405,6 +435,7 @@ def register(client, bot=None):
             ]
 
             reply_target = event.reply_to_msg_id or event.id
+
             await event.client.send_file(
                 event.chat_id,
                 file=out_file,
@@ -413,3 +444,5 @@ def register(client, bot=None):
                 attributes=custom_attributes
             )
             await status.delete()
+
+register_quote_stickers = register
