@@ -13,6 +13,17 @@ from core.inline import init_inline
 # Логирование
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
+
+# Глушим системный спам обновлений и чанков Telethon
+for noisy_logger in (
+    "telethon.client.updates",
+    "telethon.client.uploads",
+    "telethon.network.mtprotosender",
+    "telethon.network.connection.connection",
+    "telethon.extensions.messagebox"
+):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler(sys.stdout))
