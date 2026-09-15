@@ -1,4 +1,4 @@
-# modules/downloader.py — Мультимедиа комбайн v8.0 (Authenticated Engine)
+# modules/downloader.py — Мультимедиа комбайн v8.5 (Cookie Client Fix: web_embedded)
 import os
 import re
 import sys
@@ -31,7 +31,7 @@ COMMANDS = (
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
     "Мульти-поиск аудио:\n"
-    "├ 🍪 YouTube Authenticated (Прямой доступ по кукам)\n"
+    "├ 🍪 YouTube Authenticated (Через web_embedded без ошибки reload)\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
     "└ 🔴 Piped Stream (Резервный аудио-шлюз)"
@@ -46,6 +46,14 @@ SESSIONS = {}
 WAITING_TRIM = {}
 
 UNIVERSAL_FORMAT = "bv*+ba/b/bestvideo/bestaudio/best"
+
+# Аргументы yt-dlp, устраняющие ошибку 'The page needs to be reloaded'
+YT_CLIENT_ARGS = {
+    'youtube': {
+        'player_client': ['web_embedded', 'default', 'mweb'],
+        'player_skip': ['tv_downgraded', 'tv']
+    }
+}
 
 PIPED_INSTANCES = [
     "https://api.piped.private.coffee",
@@ -189,10 +197,10 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
 
     LOGGER.info(f"🔎 [Поиск] Старт поиска трека: '{clean_q}'")
 
-    # 1. Если куки присутствуют — качаем напрямую из YouTube (100% надёжность)
+    # 1. YouTube по кукам через безопасный клиент web_embedded (БЕЗ ОШИБКИ RELOAD)
     if cookie_path:
-        LOGGER.info(f"  ├ 🍪 [1/5] Проверяю YouTube с авторизацией по кукам...")
-        await throttler.update(f"⬇️ <b>YouTube:</b> скачиваю через авторизацию <code>{clean_q}</code>...", force=True)
+        LOGGER.info(f"  ├ 🍪 [1/5] Скачиваю с YouTube по кукам (web_embedded)...")
+        await throttler.update(f"⬇️ <b>YouTube:</b> скачиваю по авторизации <code>{clean_q}</code>...", force=True)
         try:
             import yt_dlp
             loop = asyncio.get_event_loop()
@@ -203,6 +211,7 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
                 'no_warnings': True,
                 'format': 'ba/b/bestaudio/best',
                 'outtmpl': str(target_file.with_suffix('')),
+                'extractor_args': YT_CLIENT_ARGS,
                 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
             }
             def run_auth_yt():
@@ -289,7 +298,7 @@ async def search_and_download_audio(query: str, target_file: Path, throttler: St
     except Exception as e:
         LOGGER.info(f"  ├ ⚠️ SoundCloud: {e}")
 
-    # 5. Резервный Piped Stream Proxy
+    # 5. Резервный Piped Stream
     LOGGER.info(f"  ├ 🔴 [5/5] Подключаю резервный Piped Stream...")
     for instance in PIPED_INSTANCES:
         try:
@@ -408,11 +417,10 @@ async def extract_info(url: str):
         'no_warnings': True,
         'skip_download': True,
         'format': UNIVERSAL_FORMAT,
+        'extractor_args': YT_CLIENT_ARGS,
     }
     if cookie_path:
         opts['cookiefile'] = cookie_path
-    else:
-        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'mweb', 'web']}}
 
     loop = asyncio.get_event_loop()
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -484,6 +492,7 @@ def register(client, bot=None):
                 'quiet': True,
                 'no_warnings': True,
                 'outtmpl': out_template,
+                'extractor_args': YT_CLIENT_ARGS,
             }
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file
