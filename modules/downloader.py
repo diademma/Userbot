@@ -1,8 +1,9 @@
-# modules/downloader.py — Мультимедиа комбайн v3.6 (DocumentAttributeAudio Fix & Spotify Polish)
+# modules/downloader.py — Мультимедиа комбайн v3.7 (True Spotify Parser & Duration Fix)
 import os
 import re
 import sys
 import uuid
+import json
 import urllib.parse
 import binascii
 import shutil
@@ -29,7 +30,7 @@ COMMANDS = (
     "• .dl {ссылка} — Быстрый вызов карточки\n"
     "• .dl {ссылка} [00:10-00:40] — Скачивание с нарезкой\n\n"
     "Музыкальный движок:\n"
-    "├ 🎵 Spotify (Парсинг альбомов/треков + умный поиск + ID3 теги)\n"
+    "├ 🎵 Spotify (Парсинг авторов из Next.js/OG + точный поиск + ID3 теги)\n"
     "├ ☁️ SoundCloud (Оригинал 320 kbps)\n"
     "├ 📌 Pinterest (Видео и Фото без сжатия)\n"
     "├ 🔴 YouTube (144p-1080p, MP3, Нарезка)\n"
@@ -72,33 +73,111 @@ async def ensure_latest_ytdlp():
     except Exception as e:
         LOGGER.warning(f"Ошибка обновления yt-dlp: {e}")
 
-# --- SPOTIFY ПАРСИНГ ---
+# --- НАСТОЯЩИЙ ПАРСЕР SPOTIFY С ИЗВЛЕЧЕНИЕМ АРТИСТОВ ---
 async def get_spotify_meta(url: str) -> dict | None:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://open.spotify.com/oembed?url={url}", timeout=8) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    raw_title = data.get("title", "Track")
-                    author = data.get("author_name", "")
-                    
-                    # Если автор пустой или равен стандартной заглушке
-                    if not author or author.lower() in ("artist", "unknown artist"):
-                        author = ""
+    """Извлекает точные метаданные Spotify (Название, ВСЕХ артистов и HD обложку)"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+    }
+    m = re.search(r'spotify\.com/(track|album|playlist)/([a-zA-Z0-9]+)', url)
+    if not m:
+        return None
 
-                    thumb = data.get("thumbnail_url", "")
-                    return {
-                        "title": raw_title,
-                        "author": author,
-                        "thumb": thumb
-                    }
+    res_type, res_id = m.group(1), m.group(2)
+    embed_url = f"https://open.spotify.com/embed/{res_type}/{res_id}"
+    direct_url = f"https://open.spotify.com/{res_type}/{res_id}"
+
+    title = ""
+    artist = ""
+    thumb = ""
+
+    # 1. Запрос к embed странице (содержит __NEXT_DATA__ со всеми авторами)
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(embed_url, timeout=10) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+
+                    # Парсинг структурированного JSON Next.js
+                    m_next = re.search(r'<script\s+id="__NEXT_DATA__"\s+type="application/json">(.*?)</script>', html, re.DOTALL)
+                    if m_next:
+                        try:
+                            d = json.loads(m_next.group(1))
+                            props = d.get('props', {}).get('pageProps', {})
+                            entity = props.get('state', {}).get('data', {}).get('entity', {})
+                            if not entity:
+                                entity = props.get('track') or props.get('album') or {}
+
+                            if entity.get('name'):
+                                title = entity['name']
+                            if entity.get('artists'):
+                                artist = ", ".join([a.get('name', '') for a in entity['artists'] if a.get('name')])
+
+                            vis = entity.get('visualIdentity', {}).get('image', [])
+                            if vis and isinstance(vis, list) and vis[0].get('url'):
+                                thumb = vis[0]['url']
+                            elif entity.get('album', {}).get('images'):
+                                thumb = entity['album']['images'][0].get('url', '')
+                        except Exception as e:
+                            LOGGER.warning(f"Next.js parse note: {e}")
+
+                    # Резервный парсинг OpenGraph в embed
+                    if not title:
+                        m_og_title = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html)
+                        if m_og_title: title = m_og_title.group(1).strip()
+
+                    if not artist:
+                        m_og_desc = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html)
+                        if m_og_desc:
+                            desc = m_og_desc.group(1).strip()
+                            if "·" in desc:
+                                artist = desc.split("·")[0].strip()
+
+                    if not thumb:
+                        m_og_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
+                        if m_og_img: thumb = m_og_img.group(1).strip()
     except Exception as e:
-        LOGGER.warning(f"Spotify oEmbed error: {e}")
+        LOGGER.warning(f"Spotify embed fetch error: {e}")
+
+    # 2. Если автор всё ещё не найден — парсим прямую страницу
+    if not artist or not title:
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(direct_url, timeout=10) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+
+                        if not title:
+                            m_og_title = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html)
+                            if m_og_title: title = m_og_title.group(1).strip()
+
+                        if not artist:
+                            m_og_desc = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\']([^"\']+)["\']', html)
+                            if m_og_desc:
+                                desc = m_og_desc.group(1).strip()
+                                if "·" in desc:
+                                    artist = desc.split("·")[0].strip()
+
+                        if not artist:
+                            m_page_title = re.search(r'<title>([^<]+)</title>', html)
+                            if m_page_title:
+                                pt = m_page_title.group(1)
+                                m_by = re.search(r'by\s+([^|]+?)\s*\|\s*Spotify', pt, re.IGNORECASE)
+                                if m_by: artist = m_by.group(1).strip()
+        except Exception as e:
+            LOGGER.warning(f"Spotify direct fetch error: {e}")
+
+    if title:
+        return {
+            "title": title,
+            "author": artist,
+            "thumb": thumb
+        }
     return None
 
-# --- МУЛЬТИ-ПОИСКОВИК МУЗЫКИ (HITMO, SEFON, SOUNDCLOUD) ---
+# --- МУЛЬТИ-ПОИСКОВИК АУДИО ---
 async def search_and_download_audio(query: str, target_file: Path) -> bool:
-    """Ищет трек на открытых музыкальных ресурсах"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -106,7 +185,7 @@ async def search_and_download_audio(query: str, target_file: Path) -> bool:
     clean_q = re.sub(r"\s+", " ", query).strip()
     encoded_query = urllib.parse.quote(clean_q)
 
-    # 1. Источник: Hitmo (rus.hitmotop.com)
+    # 1. Hitmo
     try:
         hitmo_url = f"https://rus.hitmotop.com/search?q={encoded_query}"
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -119,18 +198,17 @@ async def search_and_download_audio(query: str, target_file: Path) -> bool:
                         matches = [f"https://rus.hitmotop.com{m}" for m in matches]
 
                     if matches:
-                        download_url = matches[0]
-                        async with session.get(download_url, timeout=25) as dl_resp:
+                        async with session.get(matches[0], timeout=25) as dl_resp:
                             if dl_resp.status == 200:
                                 with open(target_file, "wb") as f:
                                     f.write(await dl_resp.read())
                                 if target_file.stat().st_size > 500_000:
-                                    LOGGER.info(f"✅ Трек успешно скачан с Hitmo: {clean_q}")
+                                    LOGGER.info(f"✅ Скачано с Hitmo: {clean_q}")
                                     return True
     except Exception as e:
-        LOGGER.warning(f"Hitmo search: {e}")
+        LOGGER.warning(f"Hitmo error: {e}")
 
-    # 2. Источник: Sefon (sefon.pro)
+    # 2. Sefon
     try:
         sefon_url = f"https://sefon.pro/search/?q={encoded_query}"
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -144,12 +222,12 @@ async def search_and_download_audio(query: str, target_file: Path) -> bool:
                                 with open(target_file, "wb") as f:
                                     f.write(await dl_resp.read())
                                 if target_file.stat().st_size > 500_000:
-                                    LOGGER.info(f"✅ Трек успешно скачан с Sefon: {clean_q}")
+                                    LOGGER.info(f"✅ Скачано с Sefon: {clean_q}")
                                     return True
     except Exception as e:
-        LOGGER.warning(f"Sefon search: {e}")
+        LOGGER.warning(f"Sefon error: {e}")
 
-    # 3. Источник: SoundCloud через yt-dlp (Работает безотказно)
+    # 3. SoundCloud
     try:
         import yt_dlp
         sc_opts = {
@@ -171,16 +249,15 @@ async def search_and_download_audio(query: str, target_file: Path) -> bool:
 
         await loop.run_in_executor(None, run_sc)
         if target_file.exists() and target_file.stat().st_size > 500_000:
-            LOGGER.info(f"✅ Трек скачан с SoundCloud: {clean_q}")
+            LOGGER.info(f"✅ Скачано с SoundCloud: {clean_q}")
             return True
     except Exception as e:
-        LOGGER.warning(f"SoundCloud fallback search: {e}")
+        LOGGER.warning(f"SoundCloud error: {e}")
 
     return False
 
-# --- ВШИВКА ТЕГОВ И ОБЛОЖКИ SPOTIFY ---
+# --- ТЕГИРОВАНИЕ SPOTIFY ---
 async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_url: str = None) -> int:
-    """Стирает мусорные теги сайтов, вшивает официальный паспорт Spotify и возвращает длительность"""
     duration = 0
     cover_data = None
 
@@ -197,7 +274,6 @@ async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_ur
         from mutagen.mp3 import MP3
         from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, ID3NoHeaderError
 
-        # Считываем реальную длительность
         try:
             audio_info = MP3(str(mp3_path))
             duration = int(audio_info.info.length or 0)
@@ -206,7 +282,7 @@ async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_ur
 
         try:
             audio = ID3(str(mp3_path))
-            audio.delete() # Полная зачистка мусора
+            audio.delete()
         except ID3NoHeaderError:
             pass
 
@@ -224,7 +300,7 @@ async def apply_clean_metadata(mp3_path: Path, title: str, artist: str, cover_ur
             ))
         audio.save(str(mp3_path), v2_version=3)
     except Exception as e:
-        LOGGER.warning(f"Mutagen tag error: {e}")
+        LOGGER.warning(f"Mutagen error: {e}")
 
     return duration
 
@@ -296,13 +372,13 @@ def register(client, bot=None):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
 
-            # 1. ОБРАБОТКА SPOTIFY
+            # 1. SPOTIFY ЗАГРУЗКА
             if platform == "spotify":
                 meta = session.get("spotify_meta") or {}
                 artist = meta.get("author", "").strip()
                 title = meta.get("title", "Track").strip()
 
-                # Формируем чистый запрос: если исполнитель пустой, ищем чисто по названию
+                # Точный поисковый запрос с артистом
                 search_query = f"{artist} - {title}".strip(" -") if artist else title
 
                 out_mp3 = tmp_path / "track.mp3"
@@ -310,30 +386,29 @@ def register(client, bot=None):
 
                 if not ok or not out_mp3.exists():
                     if status_event:
-                        try: await status_event.edit("❌ <b>Не удалось найти трек в аудиобазах.</b>", parse_mode="html")
+                        try: await status_event.edit("❌ <b>Трек не найден в базах.</b>", parse_mode="html")
                         except Exception: pass
                     return
 
-                # Вшиваем теги и получаем реальную длительность
+                # Зачистка тегов и получение реальной длительности
                 duration = await apply_clean_metadata(out_mp3, title, artist, meta.get("thumb"))
-
                 caption = f"🎵 <b>{artist}</b> — <i>{title}</i>" if artist else f"🎵 <b>{title}</b>"
 
-                # ИСПРАВЛЕНО: duration передан обязательным первым аргументом
+                # Исправлена ошибка DocumentAttributeAudio (duration передан первым аргументом)
                 await client.send_file(
                     target_chat_id,
                     file=str(out_mp3),
                     reply_to=reply_to_id,
                     caption=caption,
                     parse_mode="html",
-                    attributes=[DocumentAttributeAudio(duration=duration, title=title, performer=artist or "Spotify")]
+                    attributes=[DocumentAttributeAudio(duration=int(duration or 0), title=title, performer=artist or "Spotify")]
                 )
                 if status_event:
                     try: await status_event.edit("✅ <b>Готово!</b>", parse_mode="html")
                     except Exception: pass
                 return
 
-            # 2. ПРЯМАЯ ЗАГРУЗКА ФОТО PINTEREST
+            # 2. PINTEREST ФОТО
             if platform == "pinterest" and not session.get("is_video"):
                 direct_img = session.get("direct_url") or session.get("thumb")
                 if direct_img:
@@ -355,7 +430,7 @@ def register(client, bot=None):
                                     except Exception: pass
                                 return
 
-            # 3. YOUTUBE, TIKTOK, INSTAGRAM, SOUNDCLOUD
+            # 3. ВСЕ ОСТАЛЬНЫЕ ПЛАТФОРМЫ
             import yt_dlp
             out_template = str(tmp_path / "%(title).50s.%(ext)s")
             ydl_opts = {
@@ -405,7 +480,7 @@ def register(client, bot=None):
             except Exception as e:
                 LOGGER.error(f"Download error: {e}")
                 if status_event:
-                    try: await status_event.edit(f"❌ <b>Ошибка загрузки:</b> <code>{e}</code>", parse_mode="html")
+                    try: await status_event.edit(f"❌ <b>Ошибка:</b> <code>{e}</code>", parse_mode="html")
                     except Exception: pass
                 return
 
@@ -423,7 +498,6 @@ def register(client, bot=None):
 
             attrs = []
             if is_audio:
-                # ИСПРАВЛЕНО: duration передан обязательным первым аргументом
                 attrs = [DocumentAttributeAudio(duration=duration, title=title, performer=uploader)]
             elif main_file.endswith(".mp4"):
                 attrs = [DocumentAttributeVideo(duration=duration, w=1280, h=720, supports_streaming=True)]
@@ -483,7 +557,7 @@ def register(client, bot=None):
         tail_args = (event.pattern_match.group(2) or "").strip()
         platform = detect_platform(raw_url)
 
-        # Быстрая нарезка
+        # Нарезка
         time_m = re.match(r"^(\d+:\d+(?:\.\d+)?)-(\d+:\d+(?:\.\d+)?)$", tail_args)
         if time_m:
             status = await event.reply("⚡ <code>Загрузка нарезки...</code>", parse_mode="html")
@@ -547,7 +621,7 @@ def register(client, bot=None):
         elif platform in ("spotify", "soundcloud"):
             text = f"{banner_tag}🎵 <b>{title}</b>"
             buttons = [
-                [Button.inline("🎵 Скачать трек (MP3 320k)", data=f"dl_{sess_id}_mp3")]
+                [Button.inline("🎵 Скачать трек", data=f"dl_{sess_id}_mp3")]
             ]
 
         elif platform == "tiktok":
@@ -557,7 +631,7 @@ def register(client, bot=None):
                 [Button.inline("🔊 Звук (MP3)", data=f"dl_{sess_id}_mp3")]
             ]
 
-        else: # Instagram и прочие
+        else:
             text = f"{banner_tag}🎬 <b>{title[:65]}</b>"
             buttons = [
                 [Button.inline("🎬 Скачать медиа", data=f"dl_{sess_id}_media")],
@@ -578,7 +652,6 @@ def register(client, bot=None):
             "buttons": buttons
         }
 
-        # Отправка инлайн-карточки
         if bot:
             bot_me = await bot.get_me()
             try:
