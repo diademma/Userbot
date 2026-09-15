@@ -1,9 +1,10 @@
-# modules/downloader.py — Мультимедиа комбайн v5.5 (Piped + Cobalt Stream Integration)
+# modules/downloader.py — Мультимедиа комбайн v6.0 (FloodWait Throttler & Direct Android Engine)
 import os
 import re
 import sys
 import uuid
 import json
+import time
 import urllib.parse
 import binascii
 import shutil
@@ -32,11 +33,10 @@ COMMANDS = (
     "Мульти-поиск аудио:\n"
     "├ 🌐 Hitmo & Sefon (СНГ и мировые треки)\n"
     "├ ☁️ SoundCloud (Оригинальные загрузки)\n"
-    "├ 🔴 Piped API + Cobalt Engine (Мгновенный поиск + чистый MP3)\n"
-    "└ 🔴 Живой Invidious API"
+    "└ 🔴 YouTube Music (Прямой обход анти-бота через Android-клиент)"
 )
 
-# Заглушаем спам Telethon
+# Глушим системный спам Telethon
 for noisy in ("telethon.client.updates", "telethon.client.uploads", "telethon.network.mtprotosender"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -47,24 +47,33 @@ WAITING_TRIM = {}
 
 UNIVERSAL_FORMAT = "bv*+ba/b/bestvideo/bestaudio/best"
 
-# Только живые рабочие шлюзы поиска YouTube
 PIPED_SEARCH_INSTANCES = [
     "https://api.piped.private.coffee",
     "https://pipedapi.reallyaweso.me",
     "https://pipedapi.drgns.space"
 ]
 
-# Шлюзы Cobalt для прямой выгрузки аудио без блокировок
-COBALT_INSTANCES = [
-    "https://cobalt.meowing.de",
-    "https://cobalt.canine.tools"
-]
+# --- УМНЫЙ ТРОТТЛЕР ДЛЯ ЗАЩИТЫ ОТ FLOOD WAIT ---
+class StatusThrottler:
+    def __init__(self, event, interval=2.5):
+        self.event = event
+        self.interval = interval
+        self.last_update = 0.0
+        self.last_text = ""
 
-INVIDIOUS_INSTANCES = [
-    "https://inv.nadeko.net",
-    "https://invidious.nerdvpn.de",
-    "https://invidious.tiekoetter.com"
-]
+    async def update(self, text: str, force: bool = False):
+        now = time.time()
+        if not force and (now - self.last_update < self.interval):
+            return
+        if text == self.last_text:
+            return
+        self.last_update = now
+        self.last_text = text
+        if self.event:
+            try:
+                await self.event.edit(text, parse_mode="html")
+            except Exception:
+                pass
 
 def get_ffmpeg_path():
     p = shutil.which("ffmpeg")
@@ -91,7 +100,7 @@ async def ensure_latest_ytdlp():
             stderr=asyncio.subprocess.DEVNULL
         )
         await proc.wait()
-        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до последней версии.")
+        LOGGER.info("🚀 [MediaGrabber] yt-dlp обновлен до актуальной версии.")
     except Exception as e:
         LOGGER.warning(f"Ошибка обновления yt-dlp: {e}")
 
@@ -159,45 +168,46 @@ async def get_spotify_meta(url: str) -> dict | None:
 
     return {"title": title or "Track", "author": artist, "thumb": thumb} if title else None
 
-# --- ЗАГРУЗКА АУДИО ИЗ YOUTUBE ЧЕРЕЗ COBALT API ---
-async def download_yt_via_cobalt(video_id: str, target_file: Path) -> bool:
-    yt_url = f"https://www.youtube.com/watch?v={video_id}"
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
-    payload = {
-        "url": yt_url,
-        "downloadMode": "audio",
-        "audioFormat": "mp3",
-        "audioBitrate": "320"
+# --- ПРЯМАЯ ЗАГРУЗКА YOUTUBE ЧЕРЕЗ АНДРОИД-КЛИЕНТ ---
+async def download_youtube_direct(query_or_url: str, target_file: Path) -> bool:
+    """Выкачивает аудиодорожку с YouTube через Android API без капчи и блокировок"""
+    import yt_dlp
+    loop = asyncio.get_event_loop()
+    yt_opts = {
+        'ffmpeg_location': get_ffmpeg_path(),
+        'quiet': True,
+        'no_warnings': True,
+        'format': 'ba/b/bestaudio/best',
+        'outtmpl': str(target_file.with_suffix('')),
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android'],
+                'player_skip': ['web', 'mweb'],
+            }
+        },
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '320',
+        }]
     }
 
-    for c_host in COBALT_INSTANCES:
-        try:
-            LOGGER.info(f"  ├ ⚡ Пробую Cobalt шлюз: {c_host}...")
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.post(c_host, json=payload, timeout=12) as resp:
-                    if resp.status != 200: continue
-                    data = await resp.json(content_type=None)
-                    stream_url = data.get("url")
-                    if stream_url:
-                        LOGGER.info(f"  ├ ⬇️ Cobalt отдал прямой аудиопоток, скачиваю...")
-                        async with session.get(stream_url, timeout=35) as dl_r:
-                            if dl_r.status == 200:
-                                with open(target_file, "wb") as f: f.write(await dl_r.read())
-                                if target_file.exists() and target_file.stat().st_size > 400_000:
-                                    LOGGER.info(f"  └ 🎉 Успешно скачано через Cobalt ({c_host})!")
-                                    return True
-        except Exception as e:
-            LOGGER.info(f"  ├ ⚠️ Cobalt {c_host} пропущен: {e}")
-            continue
+    try:
+        def run_dl():
+            with yt_dlp.YoutubeDL(yt_opts) as ydl:
+                target = query_or_url if query_or_url.startswith("http") else f"ytsearch1:{query_or_url}"
+                return ydl.extract_info(target, download=True)
+
+        await loop.run_in_executor(None, run_dl)
+        if target_file.exists() and target_file.stat().st_size > 400_000:
+            return True
+    except Exception as e:
+        LOGGER.info(f"  ├ ⚠️ Ошибка загрузки YouTube Android: {e}")
 
     return False
 
 # --- МУЛЬТИ-ШЛЮЗ ПОИСКА АУДИО ---
-async def search_and_download_audio(query: str, target_file: Path, status_event=None) -> bool:
+async def search_and_download_audio(query: str, target_file: Path, throttler: StatusThrottler) -> bool:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -207,14 +217,9 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
 
     LOGGER.info(f"🔎 [Поиск] Старт поиска трека: '{clean_q}'")
 
-    async def update_tg(text):
-        if status_event:
-            try: await status_event.edit(text, parse_mode="html")
-            except Exception: pass
-
     # 1. Hitmo
     LOGGER.info(f"  ├ 🌐 [1/4] Проверяю Hitmo...")
-    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 <i>Hitmo...</i>")
+    await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 <i>Hitmo...</i>")
     try:
         hitmo_url = f"https://rus.hitmotop.com/search?q={encoded_query}"
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -228,7 +233,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
 
                     if matches:
                         LOGGER.info(f"  ├ ✅ Hitmo: трек найден! Скачиваю...")
-                        await update_tg(f"⬇️ <b>Hitmo:</b> скачиваю <code>{clean_q}</code>...")
+                        await throttler.update(f"⬇️ <b>Hitmo:</b> скачиваю <code>{clean_q}</code>...", force=True)
                         async with session.get(matches[0], timeout=25) as dl_resp:
                             if dl_resp.status == 200:
                                 with open(target_file, "wb") as f: f.write(await dl_resp.read())
@@ -241,7 +246,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
 
     # 2. Sefon
     LOGGER.info(f"  ├ 🌐 [2/4] Проверяю Sefon...")
-    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 <i>Sefon...</i>")
+    await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 <i>Sefon...</i>")
     try:
         sefon_url = f"https://sefon.pro/search/?q={encoded_query}"
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -251,7 +256,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
                     mp3_links = re.findall(r'href=["\'](https?://[^"\']+\.mp3)["\']', html)
                     if mp3_links:
                         LOGGER.info(f"  ├ ✅ Sefon: трек найден! Скачиваю...")
-                        await update_tg(f"⬇️ <b>Sefon:</b> скачиваю <code>{clean_q}</code>...")
+                        await throttler.update(f"⬇️ <b>Sefon:</b> скачиваю <code>{clean_q}</code>...", force=True)
                         async with session.get(mp3_links[0], timeout=25) as dl_resp:
                             if dl_resp.status == 200:
                                 with open(target_file, "wb") as f: f.write(await dl_resp.read())
@@ -264,7 +269,7 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
 
     # 3. SoundCloud
     LOGGER.info(f"  ├ ☁️ [3/4] Проверяю SoundCloud...")
-    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ <i>SoundCloud...</i>")
+    await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ ☁️ <i>SoundCloud...</i>")
     try:
         import yt_dlp
         sc_opts = {
@@ -288,22 +293,21 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
         LOGGER.info(f"  ├ ⚠️ SoundCloud: {e}")
     LOGGER.info(f"  ├ ❌ SoundCloud: трек не найден")
 
-    # 4. YouTube Поиск через Piped ➔ Скачивание через Cobalt / Invidious
-    LOGGER.info(f"  ├ 🔴 [4/4] Подключаю YouTube Gateway (Piped + Cobalt)...")
-    await update_tg(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n├ 🌐 Hitmo: ❌\n├ 🌐 Sefon: ❌\n├ ☁️ SoundCloud: ❌\n└ 🔴 <i>YouTube Gateway...</i>")
+    # 4. YouTube Engine (Piped Search ➔ Android Direct Download)
+    LOGGER.info(f"  ├ 🔴 [4/4] Подключаю YouTube Engine (Android Bypass)...")
+    await throttler.update(f"🔎 <b>Поиск:</b> <code>{clean_q}</code>\n└ 🔴 <i>YouTube Engine...</i>", force=True)
 
     found_video_id = None
     found_title = clean_q
 
-    # Шаг А: Поиск video_id на Piped
+    # Поиск точного video_id через Piped
     for instance in PIPED_SEARCH_INSTANCES:
         try:
-            LOGGER.info(f"  ├ 🔄 Ищу на Piped ({instance})...")
+            LOGGER.info(f"  ├ 🔄 Ищу video_id на Piped ({instance})...")
             search_api = f"{instance}/search?q={encoded_query}&filter=music_songs"
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(search_api, timeout=6) as resp:
                     if resp.status != 200: continue
-                    if "json" not in resp.headers.get("Content-Type", "").lower(): continue
                     data = await resp.json(content_type=None)
                     items = data.get("items", [])
                     if not items: continue
@@ -311,60 +315,20 @@ async def search_and_download_audio(query: str, target_file: Path, status_event=
                     found_video_id = items[0].get("url", "").replace("/watch?v=", "")
                     found_title = items[0].get("title", clean_q)
                     if found_video_id:
-                        LOGGER.info(f"  ├ 🎵 Успешно найден video_id: '{found_title}' ({found_video_id})")
+                        LOGGER.info(f"  ├ 🎵 Найден ролик: '{found_title}' ({found_video_id})")
                         break
         except Exception:
             continue
 
-    # Если Piped не нашёл, пробуем Invidious поиск
-    if not found_video_id:
-        for inv_base in INVIDIOUS_INSTANCES:
-            try:
-                LOGGER.info(f"  ├ 🔄 Ищу на Invidious ({inv_base})...")
-                search_api = f"{inv_base}/api/v1/search?q={encoded_query}&type=video"
-                async with aiohttp.ClientSession(headers=headers) as session:
-                    async with session.get(search_api, timeout=6) as resp:
-                        if resp.status != 200: continue
-                        if "json" not in resp.headers.get("Content-Type", "").lower(): continue
-                        v_list = await resp.json(content_type=None)
-                        if not v_list or not isinstance(v_list, list): continue
-                        found_video_id = v_list[0].get("videoId")
-                        found_title = v_list[0].get("title", clean_q)
-                        if found_video_id:
-                            LOGGER.info(f"  ├ 🎵 Invidious нашел video_id: '{found_title}' ({found_video_id})")
-                            break
-            except Exception:
-                continue
+    # Прямое скачивание аудиодорожки с YouTube через Android API
+    target_yt = f"https://www.youtube.com/watch?v={found_video_id}" if found_video_id else clean_q
+    LOGGER.info(f"  ├ ⚡ Скачиваю аудио с YouTube без веб-капчи: {target_yt}...")
+    await throttler.update(f"⬇️ <b>YouTube:</b> скачиваю <code>{found_title}</code>...", force=True)
 
-    # Шаг Б: Если видео найдено — скачиваем аудиопоток через Cobalt
-    if found_video_id:
-        await update_tg(f"⬇️ <b>YouTube:</b> скачиваю <code>{found_title}</code>...")
-        ok = await download_yt_via_cobalt(found_video_id, target_file)
-        if ok: return True
-
-        # Резервный забор потока через Invidious itag=140 (m4a/audio)
-        for inv_base in INVIDIOUS_INSTANCES:
-            try:
-                LOGGER.info(f"  ├ 🔄 Пробую прямой поток Invidious ({inv_base})...")
-                audio_stream_url = f"{inv_base}/latest_version?id={found_video_id}&itag=140"
-                async with aiohttp.ClientSession(headers=headers) as s_inv:
-                    async with s_inv.get(audio_stream_url, timeout=30) as st_resp:
-                        if st_resp.status == 200:
-                            temp_in = target_file.with_suffix(".m4a")
-                            with open(temp_in, "wb") as f: f.write(await st_resp.read())
-                            ffmpeg_bin = get_ffmpeg_path()
-                            proc = await asyncio.create_subprocess_exec(
-                                ffmpeg_bin, "-y", "-i", str(temp_in), "-vn", "-b:a", "320k", str(target_file),
-                                stdout=asyncio.subprocess.DEVNULL,
-                                stderr=asyncio.subprocess.DEVNULL
-                            )
-                            await proc.wait()
-                            if temp_in.exists(): temp_in.unlink()
-                            if target_file.exists() and target_file.stat().st_size > 400_000:
-                                LOGGER.info(f"  └ 🎉 Успешно скачано через Invidious прямой поток!")
-                                return True
-            except Exception:
-                continue
+    ok = await download_youtube_direct(target_yt, target_file)
+    if ok:
+        LOGGER.info(f"  └ 🎉 Успешно скачано с YouTube!")
+        return True
 
     LOGGER.warning(f"  └ ❌ Все источники исчерпаны.")
     return False
@@ -442,7 +406,12 @@ async def extract_info(url: str):
         'no_warnings': True,
         'skip_download': True,
         'format': UNIVERSAL_FORMAT,
-        'extractor_args': {'youtube': {'player_client': ['android', 'mweb', 'web']}}
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android'],
+                'player_skip': ['web', 'mweb']
+            }
+        }
     }
     loop = asyncio.get_event_loop()
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -456,10 +425,9 @@ def register(client, bot=None):
         url = session["direct_url"] or session["url"]
         platform = session["platform"]
         ffmpeg_bin = get_ffmpeg_path()
+        throttler = StatusThrottler(status_event, interval=2.5)
 
-        if status_event:
-            try: await status_event.edit("⏳ <b>Загрузка медиа...</b>", parse_mode="html")
-            except Exception: pass
+        await throttler.update("⏳ <b>Загрузка медиа...</b>", force=True)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -472,12 +440,10 @@ def register(client, bot=None):
                 search_query = f"{artist} - {title}".strip(" -") if artist else title
 
                 out_mp3 = tmp_path / "track.mp3"
-                ok = await search_and_download_audio(search_query, out_mp3, status_event)
+                ok = await search_and_download_audio(search_query, out_mp3, throttler)
 
                 if not ok or not out_mp3.exists():
-                    if status_event:
-                        try: await status_event.edit("❌ <b>Трек не найден ни в одной базе.</b>", parse_mode="html")
-                        except Exception: pass
+                    await throttler.update("❌ <b>Трек не найден ни в одной базе.</b>", force=True)
                     return
 
                 duration = await apply_clean_metadata(out_mp3, title, artist, meta.get("thumb"))
@@ -491,9 +457,7 @@ def register(client, bot=None):
                     parse_mode="html",
                     attributes=[DocumentAttributeAudio(duration=int(duration or 0), title=title, performer=artist or "Spotify")]
                 )
-                if status_event:
-                    try: await status_event.edit("✅ <b>Готово!</b>", parse_mode="html")
-                    except Exception: pass
+                await throttler.update("✅ <b>Готово!</b>", force=True)
                 return
 
             # 2. PINTEREST ФОТО
@@ -506,9 +470,7 @@ def register(client, bot=None):
                                 p_file = tmp_path / "pinterest.jpg"
                                 with open(p_file, "wb") as f: f.write(await r.read())
                                 await client.send_file(target_chat_id, file=str(p_file), reply_to=reply_to_id, caption=f"📌 <b>{session.get('title', 'Pinterest')}</b>", parse_mode="html")
-                                if status_event:
-                                    try: await status_event.edit("✅ <b>Готово!</b>", parse_mode="html")
-                                    except Exception: pass
+                                await throttler.update("✅ <b>Готово!</b>", force=True)
                                 return
 
             # 3. YOUTUBE, SOUNDCLOUD, TIKTOK, INSTAGRAM
@@ -519,7 +481,12 @@ def register(client, bot=None):
                 'quiet': True,
                 'no_warnings': True,
                 'outtmpl': out_template,
-                'extractor_args': {'youtube': {'player_client': ['android', 'mweb', 'web']}}
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android'],
+                        'player_skip': ['web', 'mweb']
+                    }
+                }
             }
 
             if time_range:
@@ -549,16 +516,12 @@ def register(client, bot=None):
                 info = await loop.run_in_executor(None, run_ydl)
             except Exception as e:
                 LOGGER.error(f"Download error: {e}")
-                if status_event:
-                    try: await status_event.edit(f"❌ <b>Ошибка:</b> <code>{e}</code>", parse_mode="html")
-                    except Exception: pass
+                await throttler.update(f"❌ <b>Ошибка:</b> <code>{e}</code>", force=True)
                 return
 
             downloaded = [os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if not f.endswith(".part")]
             if not downloaded:
-                if status_event:
-                    try: await status_event.edit("❌ <b>Файл не найден.</b>", parse_mode="html")
-                    except Exception: pass
+                await throttler.update("❌ <b>Файл не найден.</b>", force=True)
                 return
 
             main_file = max(downloaded, key=os.path.getsize)
@@ -577,9 +540,7 @@ def register(client, bot=None):
                 caption += f"\n✂️ Нарезка: <code>[{time_range[0]} - {time_range[1]}]</code>"
 
             await client.send_file(target_chat_id, file=main_file, reply_to=reply_to_id, caption=caption, parse_mode="html", attributes=attrs)
-            if status_event:
-                try: await status_event.edit("✅ <b>Готово!</b>", parse_mode="html")
-                except Exception: pass
+            await throttler.update("✅ <b>Готово!</b>", force=True)
 
     # --- ИНЛАЙН-ОТВЕТЧИК БОТА ---
     if bot:
